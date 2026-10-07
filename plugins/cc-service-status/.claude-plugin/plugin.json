@@ -1,0 +1,8 @@
+{
+  "name": "cc-service-status",
+  "version": "0.1.0",
+  "description": "Claude のサービス稼働状況(status.claude.com)をステータスラインとペインに出す",
+  "author": { "name": "lu-llc" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

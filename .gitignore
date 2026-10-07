@@ -1,0 +1,9 @@
+# Claude Code が mod を読み込むたびに生成する型
+.claude-plugin/types/
+plugins/*/.claude-plugin/types/
+plugins/*/tsconfig.json
+
+node_modules/
+.env*
+!.env.example
+.DS_Store

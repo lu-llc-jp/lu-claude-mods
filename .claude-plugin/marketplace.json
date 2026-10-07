@@ -1,0 +1,14 @@
+{
+  "name": "lu-claude-mods",
+  "owner": {
+    "name": "lu-llc"
+  },
+  "description": "lu-llc が配布する Claude Code の mod 集",
+  "plugins": [
+    {
+      "name": "cc-service-status",
+      "source": "./plugins/cc-service-status",
+      "description": "Claude のサービス稼働状況(status.claude.com)をステータスラインとペインに出す"
+    }
+  ]
+}
