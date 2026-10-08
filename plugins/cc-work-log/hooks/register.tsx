@@ -49,11 +49,18 @@ const summaryStop = atom(
 const viewAtom = atom({ plugin: 'cc-work-log', key: 'view' } as const, null as WorkLogView | null)
 const requestAtom = atom({ plugin: 'cc-work-log', key: 'requestAt' } as const, null as number | null)
 const selectedAtom = atom({ plugin: 'cc-work-log', key: 'selected' } as const, null as string | null)
-const pendingAtom = atom({ plugin: 'cc-work-log', key: 'requestPending' } as const, false)
 
 const push = async ($: EngineInterface, entry: Omit<WorkLogEntry, 'at'>): Promise<void> => {
   const at = await $.clock.now()
   await update($, entries, list => appendEntry(list, { ...entry, at }))
+  // サブエージェントが最後に動いた時刻を覚える(ログは直近 50 件しか残らないので、ログからは求めない)
+  const agentId = entry.agentId
+  if (agentId !== undefined) {
+    await update($, agents, map => {
+      const agent = map[agentId]
+      return typeof agent === 'object' && agent !== null ? { ...map, [agentId]: { ...agent, lastActiveAt: at } } : map
+    })
+  }
 }
 
 const setStatus = async ($: EngineInterface, id: string, status: WorkLogEntry['status']) => {
@@ -197,23 +204,19 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // 新しい依頼を受けたら、マップをその依頼のぶんに切り替え、開いていた詳細を閉じる
+  // 新しい依頼を受けたら、マップをその依頼のぶんに切り替え、開いていた詳細を閉じる。
+  // ほかのフックが入力を取り下げたら区切らないよう、入力が受け付けられてから区切る
   on('prompt.submit', async ($, e, next) => {
+    const result = await next(e)
     try {
       // 出どころの無い入力(古いエンジンや、テストの $.prompt.submit)は、新しい依頼として扱う
-      if (isNewRequest((e.origin as { kind?: string } | undefined)?.kind ?? 'composer')) {
-        if (e.turnId === undefined) {
-          await startRequest($)
-        } else {
-          // 実行中のターンのあいだに打たれた入力は、そのターンが終わってから次の依頼として区切る
-          // (今のターンで終えたサブエージェントを、ターンの途中で消さないため)
-          await update($, pendingAtom, () => true)
-        }
+      if (result.drop === undefined && isNewRequest((e.origin as { kind?: string } | undefined)?.kind ?? 'composer')) {
+        await startRequest($)
       }
     } catch {
       // 区切りが付けられなくても入力は止めない
     }
-    return next(e)
+    return result
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: COMMAND }, async $ => {
@@ -277,7 +280,13 @@ export const register: Register = (on, options) => {
         // 通し番号は書き込む時点の数で決める。同時に起動すると、先に読んだ数では同じ番号が付くため
         await update($, agents, map => {
           // 続きとして同じ id で起動し直したものは、もとの番号を使い続ける(振り直すと次のものと番号が重なる)
-          agent = { ...agent, no: map[agentId]?.no ?? Object.keys(map).length + 1 }
+          // 前の回のトークンも引き継ぎ、終えたときに足す
+          const prior = map[agentId]
+          agent = {
+            ...agent,
+            no: prior?.no ?? Object.keys(map).length + 1,
+            ...(prior?.tokens === undefined ? {} : { tokens: prior.tokens }),
+          }
           return { ...map, [agentId]: agent }
         })
         if (hasToolLine) {
@@ -331,16 +340,12 @@ export const register: Register = (on, options) => {
               status,
               durationMs: e.durationMs,
               endedAt,
-              ...(tokens === undefined ? {} : { tokens }),
+              ...(tokens === undefined ? {} : { tokens: (agent.tokens ?? 0) + tokens }),
               ...(e.answer === '' ? {} : { answer: oneLine(e.answer, 400) }),
             },
           }
         })
         animate($, configView)
-      }
-      if (e.agentId === undefined && (await read($, pendingAtom))) {
-        await update($, pendingAtom, () => false)
-        await startRequest($)
       }
       if (e.agentId === undefined && summaryModel !== undefined) {
         // ターンの終わりを待たせないよう、要約は後ろで行う。いま足したターン終了の行より前が、このターンの作業
@@ -455,7 +460,8 @@ export const register: Register = (on, options) => {
       // 箱を押したら、そのサブエージェントが何をしたかを出す
       if (selected !== null && typeof chosen === 'object' && chosen !== null) {
         // 結果は3行ぶんまでにし、残りの高さをしたことの一覧に回す(長い結果で一覧が押し出されないように)
-        const answer = chosen.answer === undefined ? undefined : fit(chosen.answer, Math.max(10, width * 3 - 6))
+        // 「結果: 」の6マスと、行末で2マスの文字が折り返すぶん(1行に1マス)を見込んで切る
+        const answer = chosen.answer === undefined ? undefined : fit(chosen.answer, Math.max(10, width * 3 - 6 - 3))
         const listRows = Math.max(1, room - 5 - (answer === undefined ? 0 : 3))
         // 状態を持たない古い記録も、マップと同じ判定(ターン終了の行があれば終えた)にそろえる
         const status = agentStatus(chosen, selected, list)
@@ -538,12 +544,26 @@ export const register: Register = (on, options) => {
           </Box>
         )
       }
+      // ほかの面(デスクトップなど)ではボタンがネイティブの形になり、箱の罫線の並びが崩れる。
+      // 箱の中の番号は文字のままにし、詳細を開くボタンはマップの下に並べる
+      const lines = layoutMap(list, known, mainModel, now, Math.max(1, room - 1), width, { scene })
+      const drawn = [...new Set(lines.flatMap(line => line.segs.flatMap(seg => (seg.press === undefined ? [] : [seg.press]))))]
       return (
         <Box flexDirection="column" width={width}>
           {header}
-          {layoutMap(list, known, mainModel, now, room, width, { scene }).map(line => (
-            <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={line} />
+          {lines.map(line => (
+            <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={line} pressable={false} />
           ))}
+          {drawn.length === 0 ? null : (
+            <Box flexDirection="row" gap={1}>
+              <Text dimColor>詳細:</Text>
+              {drawn.map(id => (
+                <Button key={`open:${id}`} dimColor onPress={open(id)}>
+                  {`#${known[id]?.no ?? '?'}`}
+                </Button>
+              ))}
+            </Box>
+          )}
         </Box>
       )
     }
@@ -697,12 +717,15 @@ const MapRow = ({
   Button,
   open,
   line,
+  pressable = true,
 }: {
   Box: BoxElement
   Text: TextElement
   Button: ButtonElement
   open: (id: string) => () => Promise<void>
   line: MapLine
+  /** false なら押せる区切りもただの文字にする(ネイティブのボタンで罫線の並びが崩れる面のため) */
+  pressable?: boolean
 }) => {
   const styled = (seg: MapSeg, i: number) => (
     <Text
@@ -713,7 +736,7 @@ const MapRow = ({
       {seg.text}
     </Text>
   )
-  if (!line.segs.some(seg => seg.press !== undefined)) {
+  if (!pressable || !line.segs.some(seg => seg.press !== undefined)) {
     return (
       <Text wrap="truncate">
         {/* 空の行も1行の高さを取るよう、空白を置く */}

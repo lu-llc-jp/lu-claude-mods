@@ -173,7 +173,8 @@ export const buildScene = (
   since: number | null,
   now: number,
 ): Scene => {
-  const last = splitTurns(list).at(-1)
+  // メインの様子は、メインの行だけで決める(バックグラウンドのサブエージェントの行で、メインが続いているように見えないように)
+  const last = splitTurns(list.filter(one => one.agentId === undefined)).at(-1)
   const spawnIds = new Set<string>()
   for (const id of Object.keys(agents)) {
     const at = agentOf(agents, id)?.spawnEntryId
@@ -195,7 +196,11 @@ export const buildScene = (
     if (status !== 'running' && earlier && !(endedAt !== undefined && since !== null && endedAt >= since)) continue
     // 前の依頼で起動して実行中のまま、長く動きの無いものは、終わりの知らせが来なかった(セッションが落ちたなど)として外す
     if (status === 'running' && earlier) {
-      const lastSeen = list.reduce((at, one) => (one.agentId === id ? Math.max(at, one.at) : at), startedAt ?? 0)
+      // ログは直近 50 件しか残らないので、覚えた最後の時刻(lastActiveAt)を主に使う
+      const lastSeen = list.reduce(
+        (at, one) => (one.agentId === id ? Math.max(at, one.at) : at),
+        Math.max(agent.lastActiveAt ?? 0, startedAt ?? 0),
+      )
       if (now - lastSeen >= STALE_MS) continue
     }
     items.set(id, {
@@ -291,7 +296,8 @@ export const hueOf = (type: string): number => {
 
 /** 消費トークンを短く書く。850、12.3k、1.2M */
 export const formatTokens = (n: number): string =>
-  n < 1000 ? String(n) : n < 1_000_000 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(1)}M`
+  // 999,950 以上は k で書くと 1000.0k になるので M にする
+  n < 1000 ? String(n) : n < 999_950 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(1)}M`
 
 /**
  * メインのカード。上の枠に見出しとモデル、中に今の様子・サブエージェントの数・トークンの合計。
@@ -594,8 +600,9 @@ export const layoutMap = (
       const right = node.x + nodeWidth - 3 - w
       const left = node.x + 2
       // 子へ下ろす付け根 ┬ とは重ねない。右に置けなければ左に置く
+      // 左下の角 ╰ を消さないよう、前の空白は角より右に置く
       const at =
-        node.children.length === 0 || right - 1 > node.center
+        right - 1 > node.x && (node.children.length === 0 || right - 1 > node.center)
           ? right
           : left + w + 1 < node.center
             ? left

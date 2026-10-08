@@ -237,6 +237,8 @@ test('メインのキャラの様子は、結果が届いた・ツールを使�
 
 test('消費トークンは、850・12.3k・1.2M のように短く書く', () => {
   expect([formatTokens(850), formatTokens(12_345), formatTokens(1_234_567)]).toEqual(['850', '12.3k', '1.2M'])
+  // 1000.0k とは書かない
+  expect([formatTokens(999_949), formatTokens(999_950)]).toEqual(['999.9k', '1.0M'])
 })
 
 test('親を省いた子は、メインから起動したものとして上の段に上がる', () => {
@@ -278,4 +280,31 @@ test('新しい依頼を受けたら、作業の行がまだ無くても、メ�
   expect(still(draw(layoutMap(finished, {}, '', T0 + 3000, 30, 40)))[1]).toMatch(/│ ✓ 回答した\(2秒\)/)
   expect(still(draw(layoutMap(finished, {}, '', T0 + 3000, 30, 40, { since: T0 + 2000 })))[1]).toMatch(/│ … 考えています/)
   expect(mainMood(buildScene(finished, {}, T0 + 2000, T0 + 3000), T0 + 3000)).toBe('thinking')
+})
+
+test('いちばん細い箱でも、トークンの表示で下の枠の角を消さない', () => {
+  const agents: Record<string, WorkLogAgent> = {}
+  for (let no = 1; no <= 4; no += 1) {
+    agents[`agent-${no}`] = agent(no, { status: 'ok', durationMs: 1000, endedAt: T0 + 100, tokens: 123_400 })
+  }
+  // 60 マスに4つ並ぶと、箱は 14 マス。'123.4k tok' は入らないので載せない
+  const bottoms = draw(layoutMap([], agents, '', LATER, 30, 60)).filter(line => line.includes('╰') && line.includes('╯') && !line.startsWith('╰'))
+  expect(bottoms[0]).toMatch(/^ ╰─+╯ ╰─+╯ ╰─+╯ ╰─+╯$/)
+})
+
+test('メインの様子はメインの行だけで決め、バックグラウンドのサブエージェントの行では「考えています」にしない', () => {
+  const list = [
+    entry('turn:t1', '回答した(2秒)', T0 + 1000, { kind: 'turn', status: 'ok' }),
+    entry('a1', '「TODO」を検索', T0 + 2000, { agentId: 'agent-1', status: 'running' }),
+  ]
+  const scene = buildScene(list, running, null, T0 + 3000)
+  expect(scene.main.status).toBe('ok')
+  expect(mainMood(scene, T0 + 3000)).toBe('done')
+})
+
+test('長く動きの無いものを見分けるのに、ログが押し出されても、覚えた最後の時刻を使う', () => {
+  const since = T0 + 1000
+  // ログには残っていないが、最後に動いたのは 1 分前
+  const agents = { 'agent-1': agent(1, { startedAt: T0, lastActiveAt: T0 + STALE_MS }) }
+  expect(buildScene([], agents, since, T0 + STALE_MS + 60_000).items).toHaveLength(1)
 })

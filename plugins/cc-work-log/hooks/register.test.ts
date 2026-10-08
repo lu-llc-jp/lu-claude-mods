@@ -692,3 +692,65 @@ test('ターミナルでは、何も動いていないときも、キャラの�
   expect(redraws.count - before).toBe(4)
   await ui.unmount()
 })
+
+test('ほかのフックが入力を取り下げたら、依頼の区切りにしない', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('prompt.submit', () => ({ drop: '取り下げた' }))
+  await start($)
+
+  await $.prompt.submit({ text: '取り下げられる入力' })
+  expect(state.requestAt).toBeUndefined()
+})
+
+test('同じ id で起動し直したサブエージェントのトークンは、各回を足す', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  const usage = (input: number) => ({
+    model: 'haiku',
+    input_tokens: input,
+    output_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  })
+  for (const input of [1000, 500]) {
+    await spawnExplore($)
+    await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'sub', reason: 'answer', agentId: 'agent-1', usage: usage(input) })
+  }
+  expect((state.agents as Record<string, { tokens?: number }>)['agent-1']?.tokens).toBe(1500)
+})
+
+test('サブエージェントがツールを使うと、最後に動いた時刻を覚える', async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  await spawnExplore($)
+  await clock.advance(5000)
+  // テストの $.tool.call では agentId を渡せないので、サブエージェントのターン終了の行で確かめる
+  await subTurn($, 'agent-1', 5000)
+  expect((state.agents as Record<string, { lastActiveAt?: number }>)['agent-1']?.lastActiveAt).toBe(clock.now())
+})
+
+test('デスクトップでは箱の中の番号をボタンにせず、詳細を開くボタンをマップの下に並べる', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `agent-${(n += 1)}` }))
+  await start($)
+  await spawnExplore($, 'w1')
+  await spawnExplore($, 'w2')
+
+  const ui = await mountPane($, 'desktop')
+  expect(await ui.find({ text: /^詳細:$/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Button' })).map(one => one.text).slice(3)).toEqual(['#1', '#2'])
+  // 箱の1行目は罫線とひと続きの文字のまま
+  expect(await ui.find({ text: /│ #1 Explore +│ │ #2 Explore +│/ })).toBeDefined()
+  await ui.press({ key: 'open:agent-2' })
+  expect(state.selected).toBe('agent-2')
+  await ui.unmount()
+})
