@@ -3,7 +3,7 @@ import type { On } from 'claude-code'
 
 import type { WorkLogEntry } from '../types'
 import { describeTool, describeTurnEnd, isNewRequest, resolveSummaryModel, shortModel } from './describe'
-import { BLINK_EVERY } from './clawd'
+import { BLINK_EVERY } from './avatar'
 import { TICK_MS } from './map'
 
 const CWD = '/work/app'
@@ -441,7 +441,7 @@ test('ペインのタブで一覧・ツリー・マップを切り替え、今�
     await ui.press({ key: 'view:map' })
     expect(await currentTab(ui)).toBe('マップ')
     if (surface === 'terminal') {
-      // ターミナルでは、メインのカードの中に Claude のキャラ(Raster)を置き、カードの ◉ は外す
+      // ターミナルでは、メインのカードの中にキャラ(Raster)を置き、カードの ◉ は外す
       expect((await ui.find({ type: 'Raster' }))?.props).toEqual(expect.objectContaining({ columns: 9, rows: 4 }))
       expect(await ui.find({ text: /^╭─ メイン ─+ opus-5-5 ─╮$/ })).toBeDefined()
     } else {

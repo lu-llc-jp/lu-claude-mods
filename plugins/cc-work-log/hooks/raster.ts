@@ -41,32 +41,39 @@ const base64Of = (bytes: Uint8Array): string => {
 }
 
 
-/** 4分割ブロック。左上 1・右上 2・左下 4・右下 8 の和で引く */
-const QUADRANTS = [0x20, 0x2598, 0x259d, 0x2580, 0x2596, 0x258c, 0x259e, 0x259b, 0x2597, 0x259a, 0x2590, 0x259c, 0x2584, 0x2599, 0x259f, 0x2588]
+/** 上半分・下半分のブロック。ブロックの部分が前景色、残りが背景色になる */
+const UPPER_HALF = 0x2580
+const LOWER_HALF = 0x2584
 
-/**
- * ドットの絵を、2×2 ドットを1マスにして Raster の cells にする。1マスに使える色は1つなので、
- * 1色の絵(ロゴのような形)向け。マスの中に色が混ざるときは、左上から見て最初の色にする
- */
-export const toQuadRaster = (pixels: Pixels): RasterCells => {
-  const columns = Math.ceil(pixels.width / 2)
+/** a から b へ t(0〜1)だけ寄せた色 */
+export const mix = (a: number, b: number, t: number): number => {
+  const k = Math.max(0, Math.min(1, t))
+  const ch = (c: number, shift: number) => (c >> shift) & 0xff
+  const one = (shift: number) => Math.round(ch(a, shift) + (ch(b, shift) - ch(a, shift)) * k)
+  return ((one(16) << 16) | (one(8) << 8) | one(0)) >>> 0
+}
+
+/** ドットの絵を Raster の cells にする。縦2ドットを ▀ か ▄ の1マスにし(上下で別の色を使える)、上下とも透明なら空白にする */
+export const toRaster = (pixels: Pixels): RasterCells => {
+  const columns = pixels.width
   const rows = Math.ceil(pixels.height / 2)
   const bytes = new Uint8Array(columns * rows * 12)
   const view = new DataView(bytes.buffer)
   for (let row = 0; row < rows; row += 1) {
-    for (let col = 0; col < columns; col += 1) {
-      const corners = [
-        getPixel(pixels, col * 2, row * 2),
-        getPixel(pixels, col * 2 + 1, row * 2),
-        getPixel(pixels, col * 2, row * 2 + 1),
-        getPixel(pixels, col * 2 + 1, row * 2 + 1),
-      ]
-      const bits = corners.reduce((sum, color, i) => (color === CLEAR ? sum : sum | (1 << i)), 0)
-      const color = corners.find(one => one !== CLEAR) ?? DEFAULT_COLOR
-      const at = (row * columns + col) * 12
-      view.setUint32(at, QUADRANTS[bits] ?? 0x20, true)
-      view.setUint32(at + 4, bits === 0 ? DEFAULT_COLOR : color, true)
-      view.setUint32(at + 8, DEFAULT_COLOR, true)
+    for (let x = 0; x < columns; x += 1) {
+      const top = getPixel(pixels, x, row * 2)
+      const bottom = getPixel(pixels, x, row * 2 + 1)
+      const at = (row * columns + x) * 12
+      // 前景色の既定は端末の文字色なので、透明な側をブロックにしてはいけない。色のある側をブロックにする
+      const [glyph, fg, bg] =
+        top === CLEAR && bottom === CLEAR
+          ? [0x20, DEFAULT_COLOR, DEFAULT_COLOR]
+          : top === CLEAR
+            ? [LOWER_HALF, bottom, DEFAULT_COLOR]
+            : [UPPER_HALF, top, bottom === CLEAR ? DEFAULT_COLOR : bottom]
+      view.setUint32(at, glyph, true)
+      view.setUint32(at + 4, fg, true)
+      view.setUint32(at + 8, bg, true)
     }
   }
   return { columns, rows, cells: base64Of(bytes) }

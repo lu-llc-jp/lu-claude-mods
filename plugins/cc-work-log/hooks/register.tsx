@@ -18,7 +18,7 @@ import {
   shortModel,
   summaryPrompt,
 } from './describe'
-import { BLINK_EVERY, BLINK_FOR, CLAWD_COLUMNS, clawdFrame } from './clawd'
+import { AVATAR_COLUMNS, BLINK_EVERY, BLINK_FOR, avatarFrame } from './avatar'
 import {
   MAP_MIN_WIDTH,
   TICK_MS,
@@ -511,10 +511,10 @@ export const register: Register = (on, options) => {
         )
       }
 
-      // ターミナルでは、メインのカードの中の左に Claude のキャラ(Raster)を置く。Raster の無い面では文字だけのマップにする
+      // ターミナルでは、メインのカードの中の左にキャラ(Raster)を置く。Raster の無い面では文字だけのマップにする
       if (e.surface === 'terminal') {
         const { Raster } = $.ui.resolve(e)
-        const lines = layoutMap(list, known, mainModel, now, room, width, { avatar: CLAWD_COLUMNS, scene })
+        const lines = layoutMap(list, known, mainModel, now, room, width, { avatar: AVATAR_COLUMNS, scene })
         const inside = lines.filter(line => line.key.startsWith('hub:in:'))
         const firstInside = lines.findIndex(line => line.key.startsWith('hub:in:'))
         const before = lines.slice(0, firstInside)
@@ -531,7 +531,7 @@ export const register: Register = (on, options) => {
                   <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={{ key: line.key, segs: line.left ?? [] }} />
                 ))}
               </Box>
-              <Raster key="clawd" {...clawdFrame(mainMood(scene, now), now)} />
+              <Raster key="avatar" {...avatarFrame(mainMood(scene, now), now)} />
               <Box flexDirection="column">
                 {inside.map(line => (
                   <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={{ key: line.key, segs: line.right ?? [] }} />

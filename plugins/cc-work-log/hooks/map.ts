@@ -1,5 +1,5 @@
 import type { WorkLogAgent, WorkLogEntry, WorkLogStatus } from '../types'
-import { CLAWD_ROWS } from './clawd'
+import { AVATAR_ROWS } from './avatar'
 import { seconds, shortModel } from './describe'
 import { agentOf, agentStatus, splitTurns } from './tree'
 
@@ -25,7 +25,7 @@ const LINK_ROWS = 2
 /** 流れる光の間隔(マス) */
 const PULSE_GAP = 4
 /** キャラを入れたメインのカードの中の行数。キャラの Raster の高さに合わせる */
-const HUB_AVATAR_ROWS = CLAWD_ROWS
+const HUB_AVATAR_ROWS = AVATAR_ROWS
 /** 前の依頼で起動して実行中のまま、これだけ動きが無いものは、終わりの知らせが来なかったものとしてマップから外す(ms) */
 export const STALE_MS = 10 * 60_000
 
@@ -301,7 +301,7 @@ export const formatTokens = (n: number): string =>
 
 /**
  * メインのカード。上の枠に見出しとモデル、中に今の様子・サブエージェントの数・トークンの合計。
- * avatar > 0 なら、中の左に avatar 列のキャラの隙間を空け(行は avatar の高さ CLAWD_ROWS ぶん)、見出しの ◉ は付けない。
+ * avatar > 0 なら、中の左に avatar 列のキャラの隙間を空け(行はキャラの高さ AVATAR_ROWS ぶん)、見出しの ◉ は付けない。
  * trunkAt: 下の枠に付け根 ┬ を付ける列(付けないなら undefined)
  */
 const hubRows = (
