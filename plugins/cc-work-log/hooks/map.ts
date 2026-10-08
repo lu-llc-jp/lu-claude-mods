@@ -10,6 +10,8 @@ export const FLIGHT_MS = 1200
 export const FLASH_MS = 900
 /** 実行中を示すスピナーのコマ */
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+/** マップを描ける幅の下限。これより狭いペインでは、描く側が「幅が足りない」と出す */
+export const MAP_MIN_WIDTH = 24
 /** マップの幅の上限。広いペインでも線が間延びしないように止める */
 const HUB_MAX = 72
 /** 箱の幅の下限と上限(マス)。箱を横に並べて入らなければ、下限まで縮めてから省く */
@@ -29,7 +31,7 @@ const HUB_AVATAR_ROWS = 4
  * edge: 線、live: 実行中の道筋を流れる光、flow・flowTrail: 依頼の粒とその尾、back・backTrail: 結果の粒とその尾、
  * hub・hubIdle・hubFlash: メインのカードの枠(動いている・静か・結果が届いた)、title: カードの見出し、
  * spin: 実行中の点、ok・error: 終えた点、no: 通し番号、type: エージェントの種類(hue で色を変える)、
- * label・labelDone: 名前、cursor: 打ち出し中のカーソル、tool: 今のツール、timeLive: 経過時間、note: 所要時間など、more: 補足
+ * tool: 今のツール、timeLive: 経過時間、note: 所要時間など、more: 補足
  */
 export type MapTone =
   | 'edge'
@@ -47,9 +49,6 @@ export type MapTone =
   | 'error'
   | 'no'
   | 'type'
-  | 'label'
-  | 'labelDone'
-  | 'cursor'
   | 'tool'
   | 'timeLive'
   | 'note'
@@ -70,15 +69,18 @@ type Item = {
   id: string
   agent: WorkLogAgent
   status: WorkLogStatus
-  /** 0 はメインから起動したもの。入れ子ほど大きく、右へずらす */
+  /** 0 はメインから起動したもの。入れ子ほど大きく、下の段に置く */
   depth: number
+  /** 起動した親のうち、マップに置かれているもの。無ければメインから起動したものとして扱う */
+  parent?: string
   startedAt?: number
   endedAt?: number
   /** 実行中のツールの文 */
   tool?: string
 }
 
-type Scene = {
+/** マップに描くもの。描画では1回だけ組み立て、配置とキャラの様子で使い回す */
+export type Scene = {
   main: { status: WorkLogStatus; endText?: string; tool?: string }
   items: Item[]
 }
@@ -137,20 +139,24 @@ const runningTool = (
   return undefined
 }
 
-/** 置くエージェントを、親子をたどる順(親の次にその子)に、起動した順で並べる。親が置かれていなければメインから起動したものとして扱う */
-const order = (ids: readonly string[], agents: Record<string, WorkLogAgent>): Array<{ id: string; depth: number }> => {
-  const shown = new Set(ids)
-  const byNo = [...ids].sort((a, b) => (agentOf(agents, a)?.no ?? 0) - (agentOf(agents, b)?.no ?? 0))
+/**
+ * 置くエージェントを、親子をたどる順(親の次にその子)に、起動した順で並べ、段(depth)と親(parent)を付ける。
+ * 親が置かれていなければメインから起動したものとして扱う。親子のたどり方はここだけで決める
+ */
+const arrange = (items: readonly Item[], agents: Record<string, WorkLogAgent>): Item[] => {
+  const byId = new Map(items.map(item => [item.id, item]))
+  const byNo = [...items].sort((a, b) => a.agent.no - b.agent.no)
   const parentOf = (id: string): string | undefined => {
     const parent = agentOf(agents, id)?.parentId
-    return parent !== undefined && shown.has(parent) ? parent : undefined
+    return parent !== undefined && byId.has(parent) ? parent : undefined
   }
-  const out: Array<{ id: string; depth: number }> = []
-  const visit = (id: string, depth: number) => {
-    out.push({ id, depth })
-    for (const child of byNo) if (parentOf(child) === id) visit(child, depth + 1)
+  const out: Item[] = []
+  const visit = (item: Item, depth: number) => {
+    const parent = parentOf(item.id)
+    out.push({ ...item, depth, ...(parent === undefined ? {} : { parent }) })
+    for (const child of byNo) if (parentOf(child.id) === item.id) visit(child, depth + 1)
   }
-  for (const id of byNo) if (parentOf(id) === undefined) visit(id, 0)
+  for (const item of byNo) if (parentOf(item.id) === undefined) visit(item, 0)
   return out
 }
 
@@ -158,7 +164,11 @@ const order = (ids: readonly string[], agents: Record<string, WorkLogAgent>): Ar
  * マップに描くものを組み立てる。置くのは、直近の依頼(since)より後に起動したものと、まだ実行中のもの。
  * since が null(まだ依頼を受けていない)なら、覚えているものをすべて置く
  */
-const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLogAgent>, since: number | null): Scene => {
+export const buildScene = (
+  list: readonly WorkLogEntry[],
+  agents: Record<string, WorkLogAgent>,
+  since: number | null,
+): Scene => {
   const last = splitTurns(list).at(-1)
   const spawnIds = new Set<string>()
   for (const id of Object.keys(agents)) {
@@ -195,10 +205,7 @@ const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLo
       endText: end?.text,
       tool: end === undefined ? runningTool(list, undefined, spawnIds) : undefined,
     },
-    items: order([...items.keys()], agents).flatMap(({ id, depth }) => {
-      const item = items.get(id)
-      return item === undefined ? [] : [{ ...item, depth }]
-    }),
+    items: arrange([...items.values()], agents),
   }
 }
 
@@ -219,13 +226,7 @@ const flashing = (items: readonly Item[], now: number): boolean =>
  * メインのキャラの様子。flash: 結果が届いた、busy: ツールを使っている、thinking: 考えている、done・error: ターンを終えた
  */
 export type MainMood = 'flash' | 'busy' | 'thinking' | 'done' | 'error'
-export const mainMood = (
-  list: readonly WorkLogEntry[],
-  agents: Record<string, WorkLogAgent>,
-  now: number,
-  since: number | null = null,
-): MainMood => {
-  const { main, items } = buildScene(list, agents, since)
+export const mainMood = ({ main, items }: Scene, now: number): MainMood => {
   if (flashing(items, now)) return 'flash'
   if (main.status === 'running') return main.tool === undefined ? 'thinking' : 'busy'
   return main.status === 'ok' ? 'done' : 'error'
@@ -235,28 +236,24 @@ export const mainMood = (
  * マップが動いているか。メインがツールを使っている・実行中のサブエージェントがいる・粒が流れている・カードが光っている、のどれか。
  * 動いていなければ描き直しを止める
  */
+export const isSceneAnimating = (scene: Scene, now: number): boolean =>
+  scene.main.tool !== undefined ||
+  flashing(scene.items, now) ||
+  scene.items.some(item => item.status === 'running' || inFlight(item.startedAt, now) || inFlight(item.endedAt, now))
+
 export const isMapAnimating = (
   list: readonly WorkLogEntry[],
   agents: Record<string, WorkLogAgent>,
   now: number,
   since: number | null = null,
-): boolean => {
-  const scene = buildScene(list, agents, since)
-  return (
-    scene.main.tool !== undefined ||
-    flashing(scene.items, now) ||
-    scene.items.some(
-      item => item.status === 'running' || inFlight(item.startedAt, now) || inFlight(item.endedAt, now),
-    )
-  )
-}
+): boolean => isSceneAnimating(buildScene(list, agents, since), now)
 
 // ---- 描く ----
 
 /** 1マス。2マスの文字の右隣は text '' で埋める */
 type Cell = { text: string; tone: MapTone; hue?: number; press?: string }
 /** slot: キャラを置く隙間(列 at から width 列)。描く側はそこに Raster を重ねる */
-type Row = { key: string; cells: Cell[]; tail: MapSeg[]; slot?: { at: number; width: number } }
+type Row = { key: string; cells: Cell[]; slot?: { at: number; width: number } }
 
 const put = (row: Row, col: number, text: string, tone: MapTone, hue?: number, press?: string) => {
   while (row.cells.length <= col) row.cells.push({ text: ' ', tone: 'edge' })
@@ -308,7 +305,7 @@ const hubRows = (
   const textAt = avatar > 0 ? 2 + avatar + 1 : 2
   const inner = width - textAt - 2
 
-  const top: Row = { key: 'hub:top', cells: [], tail: [] }
+  const top: Row = { key: 'hub:top', cells: [] }
   let col = putText(top, 0, avatar > 0 ? '╭─ ' : '╭─ ◉ ', tone)
   col = putText(top, col, 'メイン', 'title')
   const model = mainModel === '' ? '' : ` ${shortModel(mainModel)} `
@@ -317,7 +314,7 @@ const hubRows = (
   putText(top, col, '─╮', tone)
 
   const body = (key: string, segs: MapSeg[]): Row => {
-    const row: Row = { key, cells: [], tail: [], ...(avatar > 0 ? { slot: { at: 2, width: avatar } } : {}) }
+    const row: Row = { key, cells: [], ...(avatar > 0 ? { slot: { at: 2, width: avatar } } : {}) }
     putText(row, 0, '│ ', tone)
     // キャラの隙間と、その右の1列の余白
     let at = putText(row, 2, ' '.repeat(textAt - 2), 'edge')
@@ -360,7 +357,7 @@ const hubRows = (
   const spent = items.reduce((sum, item) => sum + (item.agent.tokens ?? 0), 0)
   const total: MapSeg[] = spent === 0 ? [] : [{ text: `サブエージェントのトークン ${formatTokens(spent)}`, tone: 'note' }]
 
-  const bottom: Row = { key: 'hub:bottom', cells: [], tail: [] }
+  const bottom: Row = { key: 'hub:bottom', cells: [] }
   putText(bottom, 0, `╰${'─'.repeat(width - 2)}╯`, tone)
   if (trunkAt !== undefined) put(bottom, trunkAt, '┬', tone)
 
@@ -453,29 +450,19 @@ export const layoutMap = (
   now: number,
   rows: number,
   columns: number,
-  { avatar = 0, since = null }: { avatar?: number; since?: number | null } = {},
+  { avatar = 0, since = null, scene: given }: { avatar?: number; since?: number | null; scene?: Scene } = {},
 ): MapLine[] => {
-  const scene = buildScene(list, agents, since)
+  const scene = given ?? buildScene(list, agents, since)
   const hubHeight = avatar > 0 ? 2 + HUB_AVATAR_ROWS : 5
-  const width = Math.max(24, Math.min(columns, HUB_MAX))
+  const width = Math.max(MAP_MIN_WIDTH, Math.min(columns, HUB_MAX))
   let kept = scene.items.map(item => item.id)
   let omitted = 0
 
-  const placed = (): Item[] => {
-    const byId = new Map(scene.items.map(item => [item.id, item]))
-    return order(kept, agents).flatMap(({ id, depth }) => {
-      const item = byId.get(id)
-      return item === undefined ? [] : [{ ...item, depth }]
-    })
-  }
-  const parentOf = (item: Item, ids: ReadonlySet<string>): string | undefined => {
-    const parent = agentOf(agents, item.id)?.parentId
-    return parent !== undefined && ids.has(parent) ? parent : undefined
-  }
+  // 省いたものを除いて並べ直す(親を省いた子は、メインから起動したものとして上の段に上がる)
+  const placed = (): Item[] => arrange(scene.items.filter(item => kept.includes(item.id)), agents)
   /** 葉(子の無い箱)の数。横に並ぶ箱の数の最大になる */
   const leaves = (items: readonly Item[]): number => {
-    const ids = new Set(items.map(item => item.id))
-    const parents = new Set(items.flatMap(item => parentOf(item, ids) ?? []))
+    const parents = new Set(items.flatMap(item => item.parent ?? []))
     return items.filter(item => !parents.has(item.id)).length
   }
   const fits = (): boolean => {
@@ -497,7 +484,6 @@ export const layoutMap = (
   while (!fits() && drop(ids => [...ids].sort((a, b) => byNo(b) - byNo(a))[0]));
 
   const items = placed()
-  const ids = new Set(items.map(item => item.id))
   // 箱の幅は、葉を横に並べて入る幅にする
   const nodeWidth = Math.max(NODE_MIN, Math.min(NODE_MAX, Math.floor((width + 1) / Math.max(1, leaves(items))) - 1))
 
@@ -508,8 +494,7 @@ export const layoutMap = (
   for (const item of items) {
     const node = nodes.get(item.id)
     if (node === undefined) continue
-    const parent = parentOf(item, ids)
-    const parentNode = parent === undefined ? undefined : nodes.get(parent)
+    const parentNode = item.parent === undefined ? undefined : nodes.get(item.parent)
     if (parentNode === undefined) roots.push(node)
     else parentNode.children.push(node)
   }
@@ -542,7 +527,7 @@ export const layoutMap = (
 
   const out: Row[] = hubRows(scene, mainModel, width, now, roots.length > 0 ? rootCenter : undefined, avatar)
   const rowAt = (r: number): Row => {
-    while (out.length <= r) out.push({ key: `row:${out.length}`, cells: [], tail: [] })
+    while (out.length <= r) out.push({ key: `row:${out.length}`, cells: [] })
     return out[r] as Row
   }
 
@@ -593,11 +578,11 @@ export const layoutMap = (
     })
     border(top + NODE_ROWS - 1, '╰', '╯', node.children.length > 0 ? node.center : undefined, '┬')
     // 消費トークンは下の枠の右寄りに、前後に空白を置いて載せる(終えてから分かる)
-    const time: MapSeg | undefined =
+    const spent: MapSeg | undefined =
       item.agent.tokens === undefined ? undefined : { text: `${formatTokens(item.agent.tokens)} tok`, tone: 'note' }
-    if (time !== undefined) {
+    if (spent !== undefined) {
       const row = rowAt(top + NODE_ROWS - 1)
-      const w = cellWidth(time.text)
+      const w = cellWidth(spent.text)
       const right = node.x + nodeWidth - 3 - w
       const left = node.x + 2
       // 子へ下ろす付け根 ┬ とは重ねない。右に置けなければ左に置く
@@ -607,7 +592,7 @@ export const layoutMap = (
           : left + w + 1 < node.center
             ? left
             : undefined
-      if (at !== undefined) putText(row, putText(row, putText(row, at - 1, ' ', tone), time.text, time.tone), ' ', tone)
+      if (at !== undefined) putText(row, putText(row, putText(row, at - 1, ' ', tone), spent.text, spent.tone), ' ', tone)
     }
   }
 
@@ -655,7 +640,7 @@ export const layoutMap = (
 }
 
 /** マスと後ろの文を、同じ色の続きでまとめた区切りにする */
-const toSegs = (cells: readonly (Cell | MapSeg)[]): MapSeg[] => {
+const toSegs = (cells: readonly Cell[]): MapSeg[] => {
   const segs: MapSeg[] = []
   for (const one of cells) {
     const prev = segs.at(-1)
@@ -666,7 +651,7 @@ const toSegs = (cells: readonly (Cell | MapSeg)[]): MapSeg[] => {
 }
 
 const toLine = (row: Row): MapLine => {
-  const all = [...row.cells, ...row.tail]
+  const all = row.cells
   const line: MapLine = { key: row.key, segs: toSegs(all) }
   if (row.slot === undefined) return line
   return {

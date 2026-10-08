@@ -206,7 +206,7 @@ test('サブエージェントの行は、そのエージェントの名前を�
   }
 })
 
-const mountPane = ($: Engine, surface: 'terminal' | 'desktop') =>
+const mountPane = ($: Engine, surface: 'terminal' | 'desktop', bodyColumns = 80) =>
   $.ui.mount({
     plugin: 'cc-work-log',
     surface,
@@ -215,7 +215,7 @@ const mountPane = ($: Engine, surface: 'terminal' | 'desktop') =>
     props: {
       title: '作業ログ',
       isFocused: false,
-      bodyColumns: 80,
+      bodyColumns,
       placement: 'dock',
       scroll: { offset: 0, bodyRows: 30 },
       view: {},
@@ -543,9 +543,22 @@ test('マップは動いているあいだだけ描き直し、何も動いて�
   await ui.unmount()
 })
 
-test('依頼の区切りにするのは、通知やエージェントどうしのメッセージでない入力', () => {
-  expect(['composer', 'bridge', 'sdk', 'plugin', 'scheduled-trigger'].map(isNewRequest)).toEqual([true, true, true, true, true])
-  expect(['task-notification', 'peer', 'peer-send-message'].map(isNewRequest)).toEqual([false, false, false])
+test('依頼の区切りにするのは、人やプラグイン・予約が送った入力だけ', () => {
+  const requests = ['composer', 'bridge', 'sdk', 'channel', 'slack-ping', 'scheduled-trigger', 'plugin']
+  expect(requests.map(isNewRequest)).toEqual(requests.map(() => true))
+  // 完了の通知、エージェントどうしのメッセージ、エンジンが自分で入れる知らせなどは、同じ依頼の続き
+  const followUps = [
+    'task-notification',
+    'peer',
+    'peer-send-message',
+    'projects-relay',
+    'coordinator',
+    'observer',
+    'observer-activity',
+    'auto-continuation',
+    'unclassified',
+  ]
+  expect(followUps.map(isNewRequest)).toEqual(followUps.map(() => false))
 })
 
 test('マップの箱を押すと、そのサブエージェントのモデル・時間・トークン・作業・結果を出し、戻れる', { options: { view: 'map' } }, async ($, on) => {
@@ -605,5 +618,57 @@ test('新しい依頼を受けると、マップはその依頼のぶんに切�
   expect(state.selected).toBe(null)
   expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeUndefined()
   expect(await ui.find({ text: /サブエージェントはいません/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('同じ id で起動し直したサブエージェントは、もとの番号を使い続ける', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  let n = 0
+  on('agent.spawn', ($, e) => ({ model: 'haiku', agentId: e.tool_use_id === 'again' ? 'agent-1' : `agent-${(n += 1)}` }))
+  await start($)
+
+  await spawnExplore($, 'w1')
+  await spawnExplore($, 'w2')
+  await spawnExplore($, 'again')
+  await spawnExplore($, 'w3')
+  const agents = state.agents as Record<string, { no: number }>
+  expect(Object.fromEntries(Object.entries(agents).map(([id, one]) => [id, one.no]))).toEqual({
+    'agent-1': 1,
+    'agent-2': 2,
+    'agent-3': 3,
+  })
+})
+
+test('詳細を開いていてもタブで切り替えられ、切り替えると詳細は閉じる', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  await spawnExplore($)
+  await subTurn($, 'agent-1', 1000)
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'open:agent-1' })
+  expect(await currentTab(ui)).toBe('マップ')
+  expect(await ui.find({ text: /^頼まれたこと:/ })).toBeDefined()
+
+  await ui.press({ key: 'view:list' })
+  expect(await currentTab(ui)).toBe('一覧')
+  expect(state.selected).toBe(null)
+  await ui.press({ key: 'view:map' })
+  expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
+  await ui.unmount()
+})
+
+
+test('幅の足りないペインでは、マップの代わりにそう出す', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  await start($)
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+
+  const ui = await mountPane($, 'terminal', 20)
+  expect(await ui.find({ text: /マップは幅 24 マス以上で出します/ })).toBeDefined()
   await ui.unmount()
 })

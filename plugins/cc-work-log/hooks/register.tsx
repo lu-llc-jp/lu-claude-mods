@@ -19,8 +19,21 @@ import {
   summaryPrompt,
 } from './describe'
 import { CLAWD_COLUMNS, clawdFrame } from './clawd'
-import { TICK_MS, formatTokens, hueOf, isMapAnimating, layoutMap, mainMood, type MapLine, type MapSeg, type MapTone } from './map'
-import { layoutTree, type TreeLine } from './tree'
+import {
+  MAP_MIN_WIDTH,
+  TICK_MS,
+  buildScene,
+  formatTokens,
+  hueOf,
+  isMapAnimating,
+  isSceneAnimating,
+  layoutMap,
+  mainMood,
+  type MapLine,
+  type MapSeg,
+  type MapTone,
+} from './map'
+import { agentStatus, layoutTree, type TreeLine } from './tree'
 
 const PANE = 'cc-work-log'
 const COMMAND = 'cc-work-log'
@@ -79,10 +92,14 @@ const tick = async ($: EngineInterface, configView: WorkLogView): Promise<void> 
   }
 }
 
-/** 何かが動き出したときに呼ぶ。マップを見ていなければ、次の1回で止まる */
+/** 何かが動き出したときに呼ぶ。マップを見ているときだけタイマーを立てる(ペインが隠れていれば、次の1回で止まる) */
 const animate = ($: EngineInterface, configView: WorkLogView): void => {
   if (ticker !== undefined) return
-  ticker = $.clock.every(TICK_MS, () => void tick($, configView).catch(stopTicker))
+  void (async () => {
+    const view = (await read($, viewAtom)) ?? configView
+    if (view !== 'map' || ticker !== undefined) return
+    ticker = $.clock.every(TICK_MS, () => void tick($, configView).catch(stopTicker))
+  })().catch(() => undefined)
 }
 
 /** このターンの作業をモデルで要約し、ペインに1行足す。失敗しても作業ログは止めない */
@@ -230,7 +247,8 @@ export const register: Register = (on, options) => {
         }
         // 通し番号は書き込む時点の数で決める。同時に起動すると、先に読んだ数では同じ番号が付くため
         await update($, agents, map => {
-          agent = { ...agent, no: Object.keys(map).length + 1 }
+          // 続きとして同じ id で起動し直したものは、もとの番号を使い続ける(振り直すと次のものと番号が重なる)
+          agent = { ...agent, no: map[agentId]?.no ?? Object.keys(map).length + 1 }
           return { ...map, [agentId]: agent }
         })
         if (hasToolLine) {
@@ -335,6 +353,8 @@ export const register: Register = (on, options) => {
               dimColor
               onPress={async () => {
                 await update($, viewAtom, () => tab.view)
+                // 開いていた詳細は閉じる。マップに戻ったときは、詳細ではなくマップを出す
+                await update($, selectedAtom, () => null)
                 animate($, configView)
               }}
             >
@@ -373,24 +393,41 @@ export const register: Register = (on, options) => {
       const since = await read($, requestAtom)
       const selected = await read($, selectedAtom)
       const chosen = selected === null ? undefined : known[selected]
+      // 場面は描くたびに1回だけ組み立て、配置とキャラの様子で使い回す
+      const scene = buildScene(list, known, since)
+      // ペインを隠して出し直したときなど、タイマーが止まっていても動きがあれば立て直す
+      if (isSceneAnimating(scene, now)) animate($, configView)
+      if (width < MAP_MIN_WIDTH) {
+        return (
+          <Box flexDirection="column" width={width}>
+            {header}
+            <Text dimColor wrap="wrap">
+              マップは幅 {MAP_MIN_WIDTH} マス以上で出します
+            </Text>
+          </Box>
+        )
+      }
       const open = (id: string) => async () => {
         await update($, selectedAtom, () => id)
       }
 
       // 箱を押したら、そのサブエージェントが何をしたかを出す
       if (selected !== null && typeof chosen === 'object' && chosen !== null) {
-        const done = chosen.status !== undefined && chosen.status !== 'running'
+        // 状態を持たない古い記録も、マップと同じ判定(ターン終了の行があれば終えた)にそろえる
+        const status = agentStatus(chosen, selected, list)
+        const done = status !== 'running'
         // そのエージェントのツールの呼び出しと、終えた行(起動したサブエージェントの行も含む)
         const work = list.filter(one => one.agentId === selected && one.kind !== 'summary' && one.kind !== 'notice')
         const facts = [
           chosen.model === '' ? 'モデル不明' : shortModel(chosen.model),
           done
-            ? `${chosen.status === 'ok' ? '✓' : '✗'}${chosen.durationMs === undefined ? '' : ` ${seconds(chosen.durationMs)}`}`
+            ? `${status === 'ok' ? '✓' : '✗'}${chosen.durationMs === undefined ? '' : ` ${seconds(chosen.durationMs)}`}`
             : '実行中',
           ...(chosen.tokens === undefined ? [] : [`${formatTokens(chosen.tokens)} トークン`]),
         ]
         return (
           <Box flexDirection="column" width={width}>
+            {header}
             <Box flexDirection="row" gap={1}>
               <Button key="close-detail" hotkey="b" onPress={() => void update($, selectedAtom, () => null)}>
                 マップに戻る
@@ -408,7 +445,7 @@ export const register: Register = (on, options) => {
               {chosen.name}
             </Text>
             <Text dimColor>したこと({work.length} 件)</Text>
-            {work.slice(-Math.max(1, room - 6)).map(one => (
+            {work.slice(-Math.max(1, room - 7)).map(one => (
               <Text key={one.id} wrap="truncate">
                 <Text dimColor>{formatTime(one.at)} </Text>
                 <Text color={MARK_COLOR[one.status ?? 'running']}>{MARK[one.status ?? 'running']}</Text> {one.text}
@@ -427,7 +464,7 @@ export const register: Register = (on, options) => {
       // ターミナルでは、メインのカードの中の左に Claude のキャラ(Raster)を置く。Raster の無い面では文字だけのマップにする
       if (e.surface === 'terminal') {
         const { Raster } = $.ui.resolve(e)
-        const lines = layoutMap(list, known, mainModel, now, room, width, { avatar: CLAWD_COLUMNS, since })
+        const lines = layoutMap(list, known, mainModel, now, room, width, { avatar: CLAWD_COLUMNS, scene })
         const inside = lines.filter(line => line.key.startsWith('hub:in:'))
         const firstInside = lines.findIndex(line => line.key.startsWith('hub:in:'))
         const before = lines.slice(0, firstInside)
@@ -444,7 +481,7 @@ export const register: Register = (on, options) => {
                   <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={{ key: line.key, segs: line.left ?? [] }} />
                 ))}
               </Box>
-              <Raster key="clawd" {...clawdFrame(mainMood(list, known, now, since), now)} />
+              <Raster key="clawd" {...clawdFrame(mainMood(scene, now), now)} />
               <Box flexDirection="column">
                 {inside.map(line => (
                   <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={{ key: line.key, segs: line.right ?? [] }} />
@@ -460,7 +497,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" width={width}>
           {header}
-          {layoutMap(list, known, mainModel, now, room, width, { since }).map(line => (
+          {layoutMap(list, known, mainModel, now, room, width, { scene }).map(line => (
             <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={line} />
           ))}
         </Box>
@@ -597,9 +634,6 @@ const MAP_STYLE: Record<MapTone, MapStyle> = {
   error: { color: 'error' },
   no: { dimColor: true },
   type: { bold: true },
-  label: {},
-  labelDone: { dimColor: true },
-  cursor: { color: 'claude' },
   tool: { dimColor: true, italic: true },
   timeLive: { color: 'claude' },
   note: { dimColor: true },

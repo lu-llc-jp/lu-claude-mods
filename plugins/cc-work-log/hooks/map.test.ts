@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { WorkLogAgent, WorkLogEntry } from '../types'
-import { FLASH_MS, FLIGHT_MS, TICK_MS, cellWidth, fit, formatTokens, isMapAnimating, layoutMap, mainMood, type MapLine } from './map'
+import { FLASH_MS, FLIGHT_MS, TICK_MS, buildScene, cellWidth, fit, formatTokens, isMapAnimating, layoutMap, mainMood, type MapLine } from './map'
 
 const T0 = 1_000_000
 /** 起動から十分たち、粒も打ち出しも終わっている時刻。光の位置がそろうよう TICK_MS の倍数にする */
@@ -213,15 +213,27 @@ test('動いているものが無いときだけ、アニメーションは止�
 })
 
 test('メインのキャラの様子は、結果が届いた・ツールを使っている・考えている・終えた、の順に決まる', () => {
-  expect(mainMood(twoAgents(), running, LATER)).toBe('thinking')
-  expect(mainMood([...twoAgents(), entry('m1', '検索', T0, { status: 'running' })], running, LATER)).toBe('busy')
+  expect(mainMood(buildScene(twoAgents(), running, null), LATER)).toBe('thinking')
+  expect(mainMood(buildScene([...twoAgents(), entry('m1', '検索', T0, { status: 'running' })], running, null), LATER)).toBe('busy')
   const end = T0 + 12_000
   const done = { ...running, 'agent-1': agent(1, { status: 'ok', durationMs: 12_000, endedAt: end }) }
-  expect(mainMood(twoAgents(), done, end + FLIGHT_MS)).toBe('flash')
+  expect(mainMood(buildScene(twoAgents(), done, null), end + FLIGHT_MS)).toBe('flash')
   const finished = [...twoAgents(), entry('turn:t1', '回答した(2秒)', T0 + 1000, { kind: 'turn', status: 'ok' })]
-  expect(mainMood(finished, {}, LATER)).toBe('done')
+  expect(mainMood(buildScene(finished, {}, null), LATER)).toBe('done')
 })
 
 test('消費トークンは、850・12.3k・1.2M のように短く書く', () => {
   expect([formatTokens(850), formatTokens(12_345), formatTokens(1_234_567)]).toEqual(['850', '12.3k', '1.2M'])
+})
+
+test('親を省いた子は、メインから起動したものとして上の段に上がる', () => {
+  const agents = {
+    'agent-1': agent(1, { status: 'ok', durationMs: 1000, endedAt: T0 + 100 }),
+    'agent-2': agent(2, { parentId: 'agent-1' }),
+  }
+  // 箱1つぶんの高さしかなければ、終えた親(#1)を省き、子(#2)を1段目に置く
+  const lines = draw(layoutMap([], agents, '', LATER, 13, 40))
+  expect(lines.some(line => line.includes('#1'))).toBe(false)
+  expect(lines[8]).toMatch(/#2 Explore/)
+  expect(lines.at(-1)).toBe('ほか 1 体を省いた')
 })
