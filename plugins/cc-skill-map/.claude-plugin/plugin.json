@@ -1,0 +1,31 @@
+{
+  "name": "cc-skill-map",
+  "version": "0.1.0",
+  "description": "使えるスキルの一覧と、その手順の流れ(担い手・承認・サブエージェント・成果物)をペインに図で出し、実行される順に再生する",
+  "author": {
+    "name": "lu-llc"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "flowModel": {
+      "type": "string",
+      "title": "流れの読み取りに使うモデル",
+      "description": "SKILL.md から手順の流れ(担い手・承認・成果物)を読み取るモデル。off ではモデルを使わず、見出しだけの簡易な流れを出す。custom は flowModelCustom の値を使う。読み取った流れは本文が変わるまで使い回す",
+      "options": [
+        "off",
+        "haiku",
+        "sonnet",
+        "opus",
+        "custom"
+      ],
+      "default": "haiku"
+    },
+    "flowModelCustom": {
+      "type": "string",
+      "title": "流れの読み取りに使うモデル(自由指定)",
+      "description": "flowModel が custom のときだけ使う。モデル ID や略称",
+      "default": ""
+    }
+  }
+}
