@@ -17,6 +17,18 @@ export type WorkLogEntry = {
   agentId?: string
 }
 
+/** 起動したサブエージェント */
+export type WorkLogAgent = {
+  /** セッションの中での通し番号(1から) */
+  no: number
+  /** Agent ツールの description(短い説明) */
+  name: string
+  /** エージェントの種類(general-purpose、Explore など) */
+  type: string
+  /** 動いているモデル。分からなければ '' */
+  model: string
+}
+
 /** 要約を止めたときの記録。同じモデルのあいだは要約しない */
 export type WorkLogSummaryStop = { model: string; reason: string }
 
@@ -24,8 +36,8 @@ declare module 'claude-code' {
   interface PluginState {
     'cc-work-log': {
       entries: WorkLogEntry[]
-      /** サブエージェントの id → 表示名 */
-      agents: Record<string, string>
+      /** サブエージェントの id → その情報 */
+      agents: Record<string, WorkLogAgent>
       /** セッションの作業ディレクトリ。パスを短く出すのに使う */
       cwd: string
       summaryStop: WorkLogSummaryStop | null

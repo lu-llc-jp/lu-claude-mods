@@ -1,4 +1,4 @@
-import type { WorkLogEntry } from '../types'
+import type { WorkLogAgent, WorkLogEntry } from '../types'
 
 /** ペインに残す件数 */
 export const MAX_ENTRIES = 50
@@ -21,6 +21,24 @@ export const shortPath = (path: string, cwd: string): string => {
 
 const code = (value: string): string => `\`${value}\``
 
+/** ひらがな・カタカナ・漢字を含むか */
+export const hasJapanese = (value: string): boolean => /[\u3040-\u30ff\u3400-\u9fff]/.test(value)
+
+/** ログに出さないツール。SubagentHandback はサブエージェントが報告を返す仕組みで、作業ではない */
+export const HIDDEN_TOOLS: readonly string[] = ['SubagentHandback']
+
+/** モデル ID を短くする(claude-haiku-5-5 → haiku-5-5、日付の付いた ID は日付を落とす) */
+export const shortModel = (model: string): string =>
+  model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+
+/** サブエージェントの行頭に付ける名前。例 `#1 Explore·haiku-5-5` */
+export const agentLabel = (agent: WorkLogAgent): string =>
+  `#${agent.no} ${agent.type}${agent.model === '' ? '' : `·${shortModel(agent.model)}`}`
+
+/** サブエージェントの起動の行 */
+export const describeSpawn = (agent: WorkLogAgent): string =>
+  `サブエージェント ${agentLabel(agent)}『${agent.name}』を起動`
+
 /**
  * ツールの呼び出しを日本語の1行にする。
  * 決まった言い回しに当てはめるだけなので、同じ入力なら同じ文になる。
@@ -39,9 +57,9 @@ export const describeTool = (tool: string, args: Record<string, unknown>, cwd: s
     case 'NotebookEdit':
       return `ノートブック ${path('notebook_path')} を編集`
     case 'Bash': {
-      // description は「何をするコマンドか」の平易な説明。英語で来てもそのまま出す
+      // description は「何をするコマンドか」の平易な説明。日本語でなければ使わず、コマンドそのものを出す
       const description = oneLine(text(args.description))
-      return description !== '' ? description : `${code(oneLine(text(args.command), 40))} を実行`
+      return hasJapanese(description) ? description : `${code(oneLine(text(args.command), 40))} を実行`
     }
     case 'Glob':
       return `ファイルを探す: ${code(oneLine(text(args.pattern)))}`
@@ -119,10 +137,11 @@ export const SUMMARY_SYSTEM =
   'このターンで何をしたかを日本語で1〜2文、合わせて80字以内で書いてください。前置きや箇条書きは不要です。'
 
 /** 要約に渡す本文 */
-export const summaryPrompt = (list: readonly WorkLogEntry[], agents: Record<string, string>): string =>
+export const summaryPrompt = (list: readonly WorkLogEntry[], agents: Record<string, WorkLogAgent>): string =>
   list
     .map(one => {
-      const who = one.agentId === undefined ? '' : `[${agents[one.agentId] ?? 'サブエージェント'}] `
+      const agent = one.agentId === undefined ? undefined : agents[one.agentId]
+      const who = one.agentId === undefined ? '' : `[${agent === undefined ? 'サブエージェント' : agent.name}] `
       const mark = one.status === 'error' ? '(失敗)' : ''
       return `- ${who}${one.text}${mark}`
     })

@@ -2,7 +2,7 @@ import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { WorkLogEntry } from '../types'
-import { describeTool, describeTurnEnd, resolveSummaryModel } from './describe'
+import { describeTool, describeTurnEnd, resolveSummaryModel, shortModel } from './describe'
 
 const CWD = '/work/app'
 
@@ -40,9 +40,9 @@ const endTurn = ($: Engine, turnId = 't1', reason: 'answer' | 'aborted' | 'error
 const entries = async (_$: Engine): Promise<WorkLogEntry[]> => (state.entries ?? []) as WorkLogEntry[]
 
 /** ワークフローなど、Agent ツールを介さずにサブエージェントを起動する */
-const spawnExplore = ($: Engine) =>
+const spawnExplore = ($: Engine, toolUseId = 'workflow-1') =>
   $.agent.spawn({
-    tool_use_id: 'workflow-1',
+    tool_use_id: toolUseId,
     prompt: '調べて',
     description: 'テストを調べる',
     subagentType: 'Explore',
@@ -64,11 +64,15 @@ test('主なツールを日本語の1行にする', () => {
   expect(describeTool('SomethingNew', {}, CWD)).toBe('SomethingNew を使う')
 })
 
-test('Bash は description を使い、無ければコマンドの先頭を出す', () => {
+test('Bash は日本語の description を使い、無いか日本語でなければコマンドの先頭を出す', () => {
   expect(describeTool('Bash', { command: 'git status', description: '作業ツリーの状態を見る' }, CWD)).toBe(
     '作業ツリーの状態を見る',
   )
   expect(describeTool('Bash', { command: 'git status' }, CWD)).toBe('`git status` を実行')
+  // 日本語でない説明は使わず、コマンドを出す
+  expect(describeTool('Bash', { command: 'ls hooks', description: 'List plugin directory' }, CWD)).toBe(
+    '`ls hooks` を実行',
+  )
   expect(describeTool('Bash', { command: 'x'.repeat(100) }, CWD)).toBe(`\`${'x'.repeat(39)}…\` を実行`)
 })
 
@@ -136,8 +140,37 @@ test('ツールを介さないサブエージェントの起動を1行出し、i
 
   await spawnExplore($)
 
-  expect(state.agents).toEqual({ 'agent-1': 'テストを調べる' })
-  expect((await texts($)).at(-1)).toBe('サブエージェント『テストを調べる』(Explore)を起動')
+  expect(state.agents).toEqual({ 'agent-1': { no: 1, name: 'テストを調べる', type: 'Explore', model: 'haiku' } })
+  expect((await texts($)).at(-1)).toBe('サブエージェント #1 Explore·haiku『テストを調べる』を起動')
+})
+
+test('Agent ツールの起動の行に、番号・種類・モデルを書き足す', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'agent-1' }))
+  await start($)
+
+  await $.tool.call({ tool: 'Agent', description: 'テストを調べる', prompt: '調べて' })
+  const line = (await entries($)).at(-1)
+  await spawnExplore($, line?.id)
+
+  expect(await texts($)).toEqual(['サブエージェント #1 Explore·haiku-5-5『テストを調べる』を起動'])
+})
+
+test('SubagentHandback はログに出さない', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  await start($)
+
+  await $.tool.call({ tool: 'SubagentHandback', report: '終わりました' } as never)
+
+  expect(await texts($)).toEqual([])
+})
+
+test('モデル ID を短くする', () => {
+  expect(shortModel('claude-haiku-5-5')).toBe('haiku-5-5')
+  expect(shortModel('claude-sonnet-4-5-20250929')).toBe('sonnet-4-5')
+  expect(shortModel('opus')).toBe('opus')
 })
 
 test('サブエージェントの行は、そのエージェントの名前を付けて区別して描く', async ($, on) => {
@@ -160,7 +193,7 @@ test('サブエージェントの行は、そのエージェントの名前を�
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await mountPane($, surface)
-    expect(await ui.find({ text: /↳ テストを調べる: ── 作業を終えた\(回答した\(3秒\)\)/ })).toBeDefined()
+    expect(await ui.find({ text: /↳ #1 Explore·haiku ── 作業を終えた\(回答した\(3秒\)\)/ })).toBeDefined()
     expect(await ui.find({ text: /✗ テストを実行/ })).toBeDefined()
     await ui.unmount()
   }
@@ -181,6 +214,19 @@ const mountPane = ($: Engine, surface: 'terminal' | 'desktop') =>
       view: {},
     },
   })
+
+test('ペインの先頭にメインのモデルを出す', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  await start($)
+
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+
+  const ui = await mountPane($, 'terminal')
+  expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
+  await ui.unmount()
+})
 
 test('/cc-work-log でペインを開く', async ($, on) => {
   answerBasics(on, { openPane: false })

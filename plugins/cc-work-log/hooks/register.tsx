@@ -1,15 +1,19 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { WorkLogEntry, WorkLogSummaryStop } from '../types'
+import type { WorkLogAgent, WorkLogEntry, WorkLogSummaryStop } from '../types'
 import {
+  HIDDEN_TOOLS,
   SUMMARY_SYSTEM,
+  agentLabel,
   appendEntry,
   currentTurnEntries,
+  describeSpawn,
   describeTool,
   describeTurnEnd,
   oneLine,
   resolveSummaryModel,
+  shortModel,
   summaryPrompt,
 } from './describe'
 
@@ -18,7 +22,7 @@ const COMMAND = 'cc-work-log'
 
 // セッションの値は $.state に置く(ホットリロードでモジュール変数は消えるため)
 const entries = atom({ plugin: 'cc-work-log', key: 'entries' } as const, [] as WorkLogEntry[])
-const agents = atom({ plugin: 'cc-work-log', key: 'agents' } as const, {} as Record<string, string>)
+const agents = atom({ plugin: 'cc-work-log', key: 'agents' } as const, {} as Record<string, WorkLogAgent>)
 const cwdAtom = atom({ plugin: 'cc-work-log', key: 'cwd' } as const, '')
 const summaryStop = atom(
   { plugin: 'cc-work-log', key: 'summaryStop' } as const,
@@ -113,6 +117,7 @@ export const register: Register = (on, options) => {
 
   // 見るだけ。呼び出しはそのまま通し、結果も変えない
   on('tool.call', async ($, e, next) => {
+    if (HIDDEN_TOOLS.includes(String(e.tool))) return next(e)
     const args = e as unknown as Record<string, unknown>
     const id = e.tool_use_id
     try {
@@ -142,17 +147,27 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     try {
       if (result.deny === undefined && result.agentId !== undefined) {
-        const label = oneLine(e.description !== '' ? e.description : e.subagentType, 30)
         const agentId = result.agentId
-        await update($, agents, map => ({ ...map, [agentId]: label }))
+        const known = await read($, agents)
+        const agent: WorkLogAgent = {
+          no: Object.keys(known).length + 1,
+          name: oneLine(e.description !== '' ? e.description : e.subagentType, 30),
+          type: e.subagentType,
+          model: result.model,
+        }
+        await update($, agents, map => ({ ...map, [agentId]: agent }))
         const list = await read($, entries)
-        // Agent ツールの呼び出しはすでに「…を起動」の行がある。ワークフローなどツールを介さない起動だけ行を足す
+        // Agent ツールの呼び出しはすでに「…を起動」の行がある。種類とモデルはここで分かるので、その行を書き換える。
+        // ワークフローなどツールを介さない起動だけ行を足す
         const hasToolLine = e.workflow === undefined && list.some(one => one.id === e.tool_use_id)
-        if (!hasToolLine) {
+        if (hasToolLine) {
+          const text = describeSpawn(agent)
+          await update($, entries, all => all.map(one => (one.id === e.tool_use_id ? { ...one, text } : one)))
+        } else {
           await push($, {
             id: `spawn:${agentId}`,
             kind: 'agent',
-            text: `サブエージェント『${label}』(${e.subagentType})を起動`,
+            text: describeSpawn(agent),
             status: 'ok',
             agentId: e.parentAgentId,
           })
@@ -195,14 +210,24 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const list = await read($, entries)
-    const names = await read($, agents)
+    const known = await read($, agents)
+    // メインのモデルは /model で変わるので、描くたびに聞く
+    const mainModel = await $.session.model().catch(() => '')
     const width = Math.max(10, e.props.bodyColumns)
     // 最新の行が見えるよう、入るぶんだけ後ろから出す
     const room = Math.max(1, e.props.scroll.bodyRows)
 
+    const header =
+      mainModel === '' ? null : (
+        <Text dimColor wrap="truncate">
+          メイン: {shortModel(mainModel)}
+        </Text>
+      )
+
     if (list.length === 0) {
       return (
         <Box flexDirection="column" width={width}>
+          {header}
           <Text dimColor>まだ作業はありません</Text>
         </Box>
       )
@@ -210,10 +235,15 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" width={width}>
-        {list.slice(-room).map(one => {
+        {header}
+        {list.slice(header === null ? -room : -Math.max(1, room - 1)).map(one => {
           const time = formatTime(one.at)
+          const agent = one.agentId === undefined ? undefined : known[one.agentId]
+          // 古い版で覚えた名前(文字列)が残っていても描けるようにする
           const who =
-            one.agentId === undefined ? '' : `↳ ${names[one.agentId] ?? 'サブエージェント'}: `
+            one.agentId === undefined
+              ? ''
+              : `↳ ${typeof agent === 'object' ? agentLabel(agent) : 'サブエージェント'} `
           if (one.kind === 'turn') {
             return (
               <Text key={one.id} dimColor wrap="truncate">
