@@ -46,19 +46,23 @@ test('担い手は、スクリプトを1つの箱に、サブエージェント�
 test('組織図: 上にメインと人のカード、メインの下にスクリプトとサブエージェントの箱、その下に手順と成果物', () => {
   const { before, band, after } = textStage(undefined)
   expect(band).toBeUndefined()
+  // 高さ 30 なので、カードの中身はキャラの下を空けて 6 行にする
   expect([...show(before), ...show(after)]).toEqual([
-    '╭─ ◉ メイン ───────────────────────────╮        ╭─ ◉ 人 ───────────────────────╮',
-    '│ 手順 5                               │        │ 人の手順 2                   │',
-    '│ 自分で 1 · 依頼 4                    │        │ · 1 メモを受け取る           │',
-    '│ 承認 1 か所                          ├────────┤ · 3 確かめる                 │',
-    '│                                      │        │                              │',
-    '╰───────────────────┬──────────────────╯        ╰──────────────────────────────╯',
-    '  ╭─────────────────┴─────────╮',
-    '  │                           │',
-    '╭─┴─ researcher ─────────╮  ╭─┴─ スクリプト ─────────╮',
-    '│ 調べる                 │  │ 保存する               │',
-    '│ 手順 1                 │  │ 手順 1                 │',
-    '╰────────────────────────╯  ╰────────────────────────╯',
+    '╭─ ◉ メイン ───────────────────────────────╮    ╭─ ◉ 人 ───────────────────────╮',
+    '│ 手順 5                                   │    │ 人の手順 2                   │',
+    '│ 自分で 1 · 依頼 4                        │    │ · 1 メモを受け取る           │',
+    '│ 承認 1 か所                              ├────┤ · 3 確かめる                 │',
+    '│                                          │    │                              │',
+    '│                                          │    │                              │',
+    '│                                          │    │                              │',
+    '╰─────────────────────┬────────────────────╯    ╰──────────────────────────────╯',
+    '  ╭───────────────────┴────────────────────╮',
+    '  │                                        │',
+    '╭─┴─ researcher ──────────────────────╮  ╭─┴─ スクリプト ──────────────────────╮',
+    '│ 調べる                              │  │ 保存する                            │',
+    '│                                     │  │                                     │',
+    '│ 手順 1                              │  │ 手順 1                              │',
+    '╰─────────────────────────────────────╯  ╰─────────────────────────────────────╯',
     '',
     '手順',
     '  1 メモを受け取る 人',
@@ -104,17 +108,17 @@ test('再生: サブエージェントへの依頼は、メインから組織図
   const dispatch = startOf(beat => beat.kind === 'dispatch' && beat.step === 3)
   const early = show(textStage(dispatch + 10).before)
   // 最初はメインの下の ┬ のマスにいて、横の線を通り、箱の上へ下りる
-  expect(early[5]).toMatch(/^╰─+●─+╯/)
+  expect(early[7]).toMatch(/^╰─+●─+╯/)
   const mid = show(textStage(dispatch + DISPATCH_MS / 2).before)
-  expect(mid[6]).toMatch(/^ *╭─*●─*┴/)
+  expect(mid[8]).toMatch(/^ *╭─*●─*┴/)
   const late = show(textStage(dispatch + DISPATCH_MS - 10).before)
-  expect(late[7]).toMatch(/^ *●/)
+  expect(late[9]).toMatch(/^ *●/)
   const work = startOf(beat => beat.kind === 'work' && beat.step === 3)
   const working = show(textStage(work + 100).before)
-  expect(working[9]).toMatch(/│ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 調べる +│/)
+  expect(working[11]).toMatch(/│ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 調べる +│/)
   expect(working[2]).toMatch(/│ researcher の作業を待つ +│/)
   const back = show(textStage(work + 900 + DISPATCH_MS - 10).before)
-  expect(back[5]).toMatch(/◆/)
+  expect(back[7]).toMatch(/◆/)
   // 結果が届いた直後はメインのキャラが喜ぶ
   expect(stageMoods(FLOW, frameAt(FLOW, beats, work + 900 + DISPATCH_MS + 100)).main).toBe('cheer')
 })
@@ -133,7 +137,7 @@ test('最後まで再生したら、メインは終えた数を、担い手の�
   const { before } = textStage(playLength(beats) + 1)
   const lines = show(before)
   expect(lines[1]).toMatch(/│ ✓ 全 5 手順を終えた +│ +│ ✓ 2\/2 手順 +│/)
-  expect(lines[10]).toMatch(/│ ✓ 1\/1 手順 +│ +│ ✓ 1\/1 手順 +│/)
+  expect(lines[13]).toMatch(/│ ✓ 1\/1 手順 +│ +│ ✓ 1\/1 手順 +│/)
 })
 
 test('戻り先しか書かれていない手順も、戻ったあと最後まで再生し、終えた数をそのまま出す', () => {
@@ -211,6 +215,29 @@ test('キャラを描く面では、カードの中身の行を帯にして、�
     expect(texts.reduce((sum, w) => sum + w, 0)).toBe(top)
   }
   expect(show(after)[0]).toMatch(/^╰─+┬─+╯ +╰─+╯$/)
+})
+
+test('カードと箱の手順名は切り詰めずに2行まで折り返し、メインのカードには次にやることを出す', () => {
+  const long: SkillFlow = {
+    by: 'model',
+    steps: [
+      { id: 's1', title: '研究タイトルと作業フォルダを作る', actor: 'ai' },
+      { id: 's2', title: '調べる観点ごとに研究サブエージェントを並列に実行する', actor: 'subagent', agent: 'research' },
+      { id: 's3', title: '報告書を書く', actor: 'ai' },
+    ],
+    outputs: [],
+  }
+  const all = timeline(long, STAGE_DELEGATED)
+  const work = all.slice(0, all.findIndex(beat => beat.kind === 'work' && beat.step === 1)).reduce((sum, beat) => sum + beat.ms, 0)
+  const lines = show(layoutStage(long, 70, 30, frameAt(long, all, work + 100), { avatars: true }).after)
+  // 箱の手順名は2行に分かれ、末尾まで読める
+  const box = lines.findIndex(line => line.includes('research ─'))
+  expect(`${lines[box + 1]}${lines[box + 2]}`.replace(/[│ ]/g, '')).toMatch(/調べる観点ごとに研究サブエージェントを並列に実行する/)
+  // メインのカード(帯)には、次にやることを出す
+  const band = layoutStage(long, 70, 30, frameAt(long, all, work + 100), { avatars: true }).band
+  const mainCol = band?.cols[2]
+  const text = mainCol?.kind === 'text' ? mainCol.rows.map(row => textOf(row)).join('') : ''
+  expect(text).toContain('次 → 3 報告書を書く')
 })
 
 test('どの幅・どの時刻でも、行は幅に収まる', () => {

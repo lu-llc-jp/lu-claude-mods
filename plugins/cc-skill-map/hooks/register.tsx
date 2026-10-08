@@ -362,10 +362,16 @@ export const register: Register = (on, options) => {
               <Box key={stage.band.key} flexDirection="row">
                 {stage.band.cols.map(col =>
                   col.kind === 'raster' ? (
-                    <Raster
-                      key={`avatar:${col.who}`}
-                      {...(col.who === 'main' ? mainAvatar(moods.main, now) : humanAvatar(moods.human, now))}
-                    />
+                    <Box key={`avatar-col:${col.who}`} flexDirection="column">
+                      <Raster
+                        key={`avatar:${col.who}`}
+                        {...(col.who === 'main' ? mainAvatar(moods.main, now) : humanAvatar(moods.human, now))}
+                      />
+                      {/* カードの中身がキャラより高いときは、キャラの下を空ける */}
+                      {Array.from({ length: col.pad }, (_, k) => (
+                        <Text key={`avatar-pad:${col.who}:${k}`}>{' '.repeat(9)}</Text>
+                      ))}
+                    </Box>
                   ) : (
                     <Box key={col.key} flexDirection="column">
                       {col.rows.map((segs, r) => (

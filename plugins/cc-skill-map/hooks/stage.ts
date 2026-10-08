@@ -13,19 +13,22 @@ import { FLASH_MS, type PlayFrame } from './play'
 export const STAGE_MIN = 66
 /** 組織図の幅の上限。広いペインでも線が間延びしないように止める */
 const STAGE_MAX = 110
-/** メインと人のカードのあいだの線の長さ(マス) */
-const LINK = 8
+/** メインと人のカードのあいだの線の長さ(マス)。短くして、そのぶんカードの文字に回す */
+const LINK = 4
 /** 人のカードの幅の下限と上限 */
 const HUMAN_MIN = 28
-const HUMAN_MAX = 36
+const HUMAN_MAX = 40
 /** 担い手の箱の幅の下限と上限、箱どうしの間 */
 const BOX_MIN = 14
-const BOX_MAX = 26
+const BOX_MAX = 40
 const BOX_GAP = 2
-/** カードの高さ(上下の枠 + 中身。中身はキャラの高さに合わせる) */
-const CARD_ROWS = AVATAR_ROWS + 2
-/** 担い手の箱の高さ(上下の枠 + 中身2行) */
-const BOX_ROWS = 4
+/** カードの中身の行数。ふだんはキャラの高さ、高さに余裕があればキャラの下を空けて増やす */
+const CARD_INNER = AVATAR_ROWS
+const CARD_INNER_TALL = AVATAR_ROWS + 2
+/** カードの中身を増やす、ペインの本体の高さの下限 */
+const TALL_HEIGHT = 30
+/** 担い手の箱の高さ(上下の枠 + 手順名2行 + 手順の数) */
+const BOX_ROWS = 5
 /** 結果が届いてから、メインのキャラが喜んでいる時間(ms) */
 const CHEER_MS = 700
 /** 進めている印のコマ */
@@ -172,7 +175,33 @@ const spinOf = (frame: PlayFrame): string => SPIN[Math.floor(frame.elapsed / 100
 const whoOf = (step: FlowStep): string =>
   step.actor === 'human' ? '人' : step.actor === 'script' ? 'スクリプト' : step.actor === 'subagent' ? (step.agent ?? 'サブエージェント') : 'メイン'
 
-type Text = { text: string; tone: FlowTone; actor?: FlowActor }
+/** カードの1項目。wrap は折り返してよい行数(無ければ1行で切り詰める) */
+type Text = { text: string; tone: FlowTone; actor?: FlowActor; wrap?: number }
+
+/** width マスごとに折り返す。lines 行に入らなければ、最後の行の末尾を … にする */
+export const wrapText = (text: string, width: number, lines: number): string[] => {
+  if (width <= 0) return []
+  const out: string[] = []
+  let line = ''
+  let used = 0
+  for (const ch of text) {
+    const w = cellWidth(ch)
+    if (used + w > width) {
+      out.push(line)
+      line = ''
+      used = 0
+    }
+    line += ch
+    used += w
+  }
+  if (line !== '' || out.length === 0) out.push(line)
+  if (out.length <= lines) return out
+  return [...out.slice(0, lines - 1), fit(out.slice(lines - 1).join(''), width)]
+}
+
+/** カードの項目を行に流し込む。rows 行に入るぶんだけ */
+const fillRows = (texts: readonly Text[], width: number, rows: number): Text[] =>
+  texts.flatMap(one => wrapText(one.text, width, one.wrap ?? 1).map(text => ({ ...one, text }))).slice(0, rows)
 
 /** メインが自分で進める手順の数と、ほかへ依頼する手順の数 */
 const splitWork = (flow: SkillFlow) => {
@@ -180,7 +209,17 @@ const splitWork = (flow: SkillFlow) => {
   return { self: flow.steps.length - delegated, delegated }
 }
 
-/** メインのカードの中身(4行)。今していることを、メインを起点に言う */
+/** 並びの上での次の手順。分岐・戻りがあれば先へ進む行き先を、終わりなら undefined */
+const nextOf = (flow: SkillFlow, i: number): number | undefined => {
+  const next = flow.steps[i].next
+  if (next === undefined) return i + 1 < flow.steps.length ? i + 1 : undefined
+  if (next.length === 0) return undefined
+  const forward = next.map(id => flow.steps.findIndex(one => one.id === id)).filter(at => at > i)
+  if (forward.length > 0) return Math.min(...forward)
+  return i + 1 < flow.steps.length ? i + 1 : undefined
+}
+
+/** メインのカードの中身。今していることを、メインを起点に言う */
 const mainTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
   const steps = flow.steps
   const work = splitWork(flow)
@@ -205,26 +244,31 @@ const mainTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
   const now = nowOf(frame)
   if (now === undefined) return []
   const status: Text = { text: `${spinOf(frame)} 手順 ${now.step + 1}/${steps.length}`, tone: 'spin' }
-  const outputs: Text = { text: `成果物 ${frame.outputs.length}`, tone: 'detail' }
+  // 次にやること。成果物の数は下の一覧で分かるので、カードには先の見通しを出す
+  const following = nextOf(flow, now.beat.kind === 'travel' ? now.beat.to : now.beat.step)
+  const outputs: Text =
+    following === undefined
+      ? { text: '次 → 終わり', tone: 'note' }
+      : { text: `次 → ${following + 1} ${steps[following].title.trim()}`, tone: 'note', wrap: 2 }
   const beat = now.beat
   if (beat.kind === 'travel') {
     const to = steps[beat.to]
     const text =
-      beat.via === 'down' ? `→ 次は「${to.title.trim()}」` : beat.to <= beat.from ? `↩ 「${to.title.trim()}」へ戻る` : `↪ 「${to.title.trim()}」へ進む`
-    return [status, { text, tone: beat.via === 'down' ? 'title' : 'branchLive' }, { text: whoOf(to), tone: 'actor', actor: to.actor }, outputs]
+      beat.via === 'down' ? `→ 次は ${beat.to + 1} ${to.title.trim()}` : `${beat.to <= beat.from ? '↩' : '↪'} ${beat.to + 1} ${to.title.trim()} へ${beat.to <= beat.from ? '戻る' : '進む'}`
+    return [status, { text, tone: beat.via === 'down' ? 'title' : 'branchLive', wrap: 2 }, { text: whoOf(to), tone: 'actor', actor: to.actor }, outputs]
   }
   const step = steps[beat.step]
   if (!STAGE_DELEGATED.includes(step.actor)) {
-    return [status, { text: step.title.trim(), tone: 'title' }, { text: step.detail ?? '', tone: 'detail' }, outputs]
+    return [status, { text: step.title.trim(), tone: 'title', wrap: 2 }, { text: step.detail ?? '', tone: 'detail', wrap: 2 }, outputs]
   }
   const who = whoOf(step)
   const doing =
     beat.kind === 'dispatch' ? `${who} に依頼` : beat.kind === 'return' ? `${who} から受け取る` : step.gate === true ? `${who} の承認を待つ` : `${who} の作業を待つ`
-  return [status, { text: doing, tone: 'actor', actor: step.actor }, { text: step.title.trim(), tone: 'detail' }, outputs]
+  return [status, { text: doing, tone: 'actor', actor: step.actor, wrap: 2 }, { text: step.title.trim(), tone: 'detail', wrap: 2 }, outputs]
 }
 
-/** 人のカードの中身(4行)。1行目に様子、続く3行に人の手順を並べ、人がどこで関わるかを見せる */
-const humanTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
+/** 人のカードの中身。1行目に様子、続く room 行に人の手順を並べ、人がどこで関わるかを見せる */
+const humanTexts = (flow: SkillFlow, frame: PlayFrame | undefined, room: number): Text[] => {
   const mine = flow.steps.flatMap((step, i) => (step.actor === 'human' ? [i] : []))
   if (mine.length === 0) return [{ text: '出番なし', tone: 'note' }]
   const now = nowOf(frame)
@@ -239,13 +283,13 @@ const humanTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
     status = waiting ? { text: '⏸ 承認待ち', tone: blink ? 'note' : 'gate' } : { text: `${spinOf(frame)} 出番`, tone: 'spin' }
   } else status = { text: `${done === mine.length ? '✓ ' : ''}${done}/${mine.length} 手順`, tone: done === mine.length ? 'ok' : 'note' }
 
-  // 3行に入らなければ、今の手順(無ければ次にやる手順)のまわりを出す
+  // room 行に入らなければ、今の手順(無ければ次にやる手順)のまわりを出す
   const focus = active ?? mine.find(i => !(frame?.done.includes(i) ?? false)) ?? mine[mine.length - 1]
   const at = mine.indexOf(focus)
-  const from = Math.max(0, Math.min(mine.length - 3, at - 1))
-  const rows = mine.slice(from, from + 3).map((i): Text => {
+  const from = Math.max(0, Math.min(mine.length - room, at - 1))
+  const rows = mine.slice(from, from + room).map((i): Text => {
     const title = `${i + 1} ${flow.steps[i].title.trim()}`
-    if (frame !== undefined && i === active) return { text: `${spinOf(frame)} ${title}`, tone: 'title' }
+    if (frame !== undefined && i === active) return { text: `${spinOf(frame)} ${title}`, tone: 'title', wrap: 2 }
     if (frame?.done.includes(i) === true) return { text: `✓ ${title}`, tone: 'detail' }
     return { text: `· ${title}`, tone: 'plain' }
   })
@@ -257,7 +301,8 @@ const humanTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
 /** キャラを描く帯。左から順に、文字の列とキャラ(main・human)を並べる */
 export type StageBand = {
   key: string
-  cols: Array<{ kind: 'text'; key: string; rows: FlowSeg[][] } | { kind: 'raster'; who: 'main' | 'human' }>
+  /** raster の pad は、キャラの下に空ける行数(カードの中身がキャラより高いとき) */
+  cols: Array<{ kind: 'text'; key: string; rows: FlowSeg[][] } | { kind: 'raster'; who: 'main' | 'human'; pad: number }>
 }
 /** 帯の上の行、帯、帯の下の行。キャラを描かない面では帯が無く、すべて行になる */
 export type Stage = { before: FlowLine[]; band?: StageBand; after: FlowLine[] }
@@ -323,6 +368,8 @@ export const layoutStage = (
   opts: { avatars: boolean },
 ): Stage => {
   const W = Math.min(width, STAGE_MAX)
+  const inner = height >= TALL_HEIGHT ? CARD_INNER_TALL : CARD_INNER
+  const CARD_ROWS = inner + 2
   const avatar = opts.avatars ? AVATAR_COLUMNS + 1 : 0
   const humanW = Math.max(HUMAN_MIN, Math.min(HUMAN_MAX, Math.floor(W * 0.4)))
   const mainW = W - LINK - humanW
@@ -352,7 +399,7 @@ export const layoutStage = (
   box(grid, 0, 0, mainW, CARD_ROWS, mainTone, { text: opts.avatars ? 'メイン' : '◉ メイン', tone: 'head' })
   const mainText = mainTexts(flow, frame)
   const tw = mainW - 4 - avatar
-  mainText.slice(0, AVATAR_ROWS).forEach((one, k) => put(grid, 1 + k, 2 + avatar, fit(one.text, tw), one.tone, one.actor))
+  fillRows(mainText, tw, inner).forEach((one, k) => put(grid, 1 + k, 2 + avatar, fit(one.text, tw), one.tone, one.actor))
 
   // 人のカード
   const humanActive = current?.actor === 'human' && delegatedNow
@@ -360,7 +407,9 @@ export const layoutStage = (
   const humanTone: FlowTone = humanActive ? (current?.gate === true ? 'gate' : 'live') : hasHuman ? 'edge' : 'doneEdge'
   box(grid, 0, hx, humanW, CARD_ROWS, humanTone, { text: opts.avatars ? '人' : '◉ 人', tone: 'actor', actor: 'human' })
   const hw = humanW - 4 - avatar
-  humanTexts(flow, frame).slice(0, AVATAR_ROWS).forEach((one, k) => put(grid, 1 + k, hx + 2 + avatar, fit(one.text, hw), one.tone, one.actor))
+  fillRows(humanTexts(flow, frame, inner - 1), hw, inner).forEach((one, k) =>
+    put(grid, 1 + k, hx + 2 + avatar, fit(one.text, hw), one.tone, one.actor),
+  )
 
   // メインと人をつなぐ線
   const linkRow = 1 + Math.floor(AVATAR_ROWS / 2)
@@ -405,19 +454,17 @@ export const layoutStage = (
       box(grid, top, left, bw, BOX_ROWS, tone, { text: '', tone: 'edge' })
       put(grid, top, cx, '┴', isActive ? 'live' : 'edge')
       put(grid, top, cx + 2, ` ${fit(worker.label, bw - 7)} `, 'actor', worker.actor)
-      const inner = bw - 4
-      if (isActive && frame !== undefined && current !== undefined) {
-        put(grid, top + 1, left + 2, fit(`${spinOf(frame)} ${current.title.trim()}`, inner), 'title')
-      } else {
-        const last = worker.steps.filter(i => frame?.done.includes(i)).at(-1)
-        const shownStep = steps[last ?? worker.steps[0]]
-        put(grid, top + 1, left + 2, fit(shownStep.title.trim(), inner), 'detail')
-      }
+      const boxInner = bw - 4
+      const title =
+        isActive && frame !== undefined && current !== undefined
+          ? { text: `${spinOf(frame)} ${current.title.trim()}`, tone: 'title' as const }
+          : { text: steps[worker.steps.filter(i => frame?.done.includes(i)).at(-1) ?? worker.steps[0]].title.trim(), tone: 'detail' as const }
+      wrapText(title.text, boxInner, 2).forEach((text, k) => put(grid, top + 1 + k, left + 2, text, title.tone))
       put(
         grid,
-        top + 2,
+        top + BOX_ROWS - 2,
         left + 2,
-        fit(frame === undefined ? `手順 ${total}` : `${allDone ? '✓ ' : ''}${done}/${total} 手順`, inner),
+        fit(frame === undefined ? `手順 ${total}` : `${allDone ? '✓ ' : ''}${done}/${total} 手順`, boxInner),
         allDone ? 'ok' : 'note',
       )
       if (isActive) path.forEach(([r, x]) => retone(grid, r, x, 'live'))
@@ -437,18 +484,18 @@ export const layoutStage = (
   const after: FlowLine[] = []
   if (opts.avatars) {
     before = [rowLine(0)]
-    const rows = Array.from({ length: AVATAR_ROWS }, (_, k) => 1 + k)
+    const rows = Array.from({ length: inner }, (_, k) => 1 + k)
     band = {
       key: 'band',
       cols: [
         { kind: 'text', key: 'band:a', rows: rows.map(r => segsOf(grid, r, 0, 2)) },
-        { kind: 'raster', who: 'main' },
+        { kind: 'raster', who: 'main', pad: inner - AVATAR_ROWS },
         { kind: 'text', key: 'band:b', rows: rows.map(r => segsOf(grid, r, 2 + AVATAR_COLUMNS, hx + 2)) },
-        { kind: 'raster', who: 'human' },
+        { kind: 'raster', who: 'human', pad: inner - AVATAR_ROWS },
         { kind: 'text', key: 'band:c', rows: rows.map(r => trimmed(segsOf(grid, r, hx + 2 + AVATAR_COLUMNS))) },
       ],
     }
-    for (let r = 1 + AVATAR_ROWS; r < gridRows; r += 1) after.push(rowLine(r))
+    for (let r = 1 + inner; r < gridRows; r += 1) after.push(rowLine(r))
   } else {
     before = Array.from({ length: gridRows }, (_, r) => rowLine(r))
   }
@@ -465,7 +512,7 @@ export const layoutStage = (
         ].map(text => ({ text, isNew: false }))
       : frame.outputs.map(one => ({ text: one.text, isNew: frame.elapsed - one.at < FLASH_MS }))
   const hasOutputs = outputItems.length > 0 || (frame !== undefined && (flow.outputs.length > 0 || steps.some(one => (one.outputs ?? []).length > 0)))
-  const left = Math.max(0, height - before.length - (band === undefined ? 0 : AVATAR_ROWS) - after.length)
+  const left = Math.max(0, height - before.length - (band === undefined ? 0 : inner) - after.length)
   // 成果物は見出しと3件ぶんを取っておく(それより少なければそのぶんだけ)
   const outputReserve = hasOutputs ? 2 + Math.min(3, Math.max(1, outputItems.length)) : 0
   const listRows = Math.min(2 + steps.length, Math.max(5, left - outputReserve))
