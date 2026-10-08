@@ -2,7 +2,9 @@ import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { WorkLogEntry } from '../types'
-import { describeTool, describeTurnEnd, resolveSummaryModel, shortModel } from './describe'
+import { describeTool, describeTurnEnd, isNewRequest, resolveSummaryModel, shortModel } from './describe'
+import { BLINK_EVERY } from './avatar'
+import { TICK_MS } from './map'
 
 const CWD = '/work/app'
 
@@ -53,6 +55,10 @@ const spawnExplore = ($: Engine, toolUseId = 'workflow-1') =>
   })
 
 const texts = async ($: Engine) => (await entries($)).map(one => one.text)
+
+/** 強調されている(今見ている)タブの名前 */
+const currentTab = async (ui: { findAll: (q: { type: 'Button' }) => Promise<Array<{ text?: string; props: Record<string, unknown> }>> }) =>
+  (await ui.findAll({ type: 'Button' })).find(one => one.props.variant === 'primary')?.text
 
 test('主なツールを日本語の1行にする', () => {
   expect(describeTool('Read', { file_path: `${CWD}/src/a.ts` }, CWD)).toBe('`src/a.ts` を読む')
@@ -201,7 +207,7 @@ test('サブエージェントの行は、そのエージェントの名前を�
   }
 })
 
-const mountPane = ($: Engine, surface: 'terminal' | 'desktop') =>
+const mountPane = ($: Engine, surface: 'terminal' | 'desktop', bodyColumns = 80) =>
   $.ui.mount({
     plugin: 'cc-work-log',
     surface,
@@ -210,7 +216,7 @@ const mountPane = ($: Engine, surface: 'terminal' | 'desktop') =>
     props: {
       title: '作業ログ',
       isFocused: false,
-      bodyColumns: 80,
+      bodyColumns,
       placement: 'dock',
       scroll: { offset: 0, bodyRows: 30 },
       view: {},
@@ -368,8 +374,8 @@ test('custom で空なら要約しない理由を出す', () => {
 const subTurn = ($: Engine, agentId: string, durationMs: number) =>
   $.turn.complete({ answer: '', durationMs, isAborted: false, turnId: `sub-${agentId}`, reason: 'answer', agentId })
 
-test('起動したサブエージェントの親・起動の行・状態を覚え、終えたら所要時間を足す', async ($, on) => {
-  answerBasics(on)
+test('起動したサブエージェントの親・起動の行・状態・時刻を覚え、終えたら所要時間を足す', async ($, on) => {
+  const clock = answerBasics(on)
   answerTools(on)
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
   await start($)
@@ -383,15 +389,29 @@ test('起動したサブエージェントの親・起動の行・状態を覚�
       model: 'haiku',
       spawnEntryId: 'spawn:agent-1',
       status: 'running',
+      startedAt: Date.parse('2026-10-08T05:00:00Z'),
     },
   })
 
+  await clock.advance(12_000)
   await subTurn($, 'agent-1', 12_000)
-  const agent = (state.agents as Record<string, { status: string; durationMs: number }>)['agent-1']
-  expect([agent?.status, agent?.durationMs]).toEqual(['ok', 12_000])
+  const agent = (state.agents as Record<string, { status: string; durationMs: number; endedAt: number }>)['agent-1']
+  expect([agent?.status, agent?.durationMs, agent?.endedAt]).toEqual(['ok', 12_000, clock.now()])
 })
 
-test('ペインのボタンで一覧とツリーを行き来する', async ($, on) => {
+test('同時に起動したサブエージェントにも、別々の通し番号を付ける', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `agent-${(n += 1)}` }))
+  await start($)
+
+  await Promise.all([spawnExplore($, 'w1'), spawnExplore($, 'w2'), spawnExplore($, 'w3')])
+  const agents = state.agents as Record<string, { no: number }>
+  expect(Object.values(agents).map(one => one.no).sort()).toEqual([1, 2, 3])
+})
+
+test('ペインのタブで一覧・ツリー・マップを切り替え、今見ているタブを強調する', async ($, on) => {
   answerBasics(on)
   answerTools(on)
   let n = 0
@@ -407,16 +427,35 @@ test('ペインのボタンで一覧とツリーを行き来する', async ($, o
   for (const surface of ['terminal', 'desktop'] as const) {
     delete state.view
     const ui = await mountPane($, surface)
-    // 初期値は一覧
+    // 初期値は一覧。3つのタブが並び、今見ているタブだけ強調する
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
-    expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
+    expect(await currentTab(ui)).toBe('一覧')
+    expect((await ui.findAll({ type: 'Button' })).map(one => one.text).slice(0, 3)).toEqual(['一覧', 'ツリー', 'マップ'])
 
-    await ui.press({ key: 'toggle-view' })
+    await ui.press({ key: 'view:tree' })
+    expect(await currentTab(ui)).toBe('ツリー')
     expect(await ui.find({ text: /メイン·opus-5-5 …/ })).toBeDefined()
     expect(await ui.find({ text: /├─ #1 Explore·haiku『テストを調べる』 ✓ 12秒/ })).toBeDefined()
     expect(await ui.find({ text: /└─ #2 Explore·haiku『テストを調べる』 …/ })).toBeDefined()
 
-    await ui.press({ key: 'toggle-view' })
+    await ui.press({ key: 'view:map' })
+    expect(await currentTab(ui)).toBe('マップ')
+    if (surface === 'terminal') {
+      // ターミナルでは、メインのカードの中にキャラ(Raster)を置き、カードの ◉ は外す
+      expect((await ui.find({ type: 'Raster' }))?.props).toEqual(expect.objectContaining({ columns: 9, rows: 4 }))
+      expect(await ui.find({ text: /^╭─ メイン ─+ opus-5-5 ─╮$/ })).toBeDefined()
+    } else {
+      expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+      expect(await ui.find({ text: /╭─ ◉ メイン ─+ opus-5-5 ─╮/ })).toBeDefined()
+    }
+    // 子は組織図の箱。番号と種類は押せるボタンで、#1 は終えて ✓ と所要時間、#2 は実行中
+    expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#2' })).toBeDefined()
+    expect(await ui.find({ text: /│ ✓ 12秒 +│ │ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 0秒 +│/ })).toBeDefined()
+
+    // マップから一覧へ直接戻れる
+    await ui.press({ key: 'view:list' })
+    expect(await currentTab(ui)).toBe('一覧')
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
     await ui.unmount()
   }
@@ -431,6 +470,287 @@ test('/config の view を tree にすると、ツリーで開く', { options: {
 
   const ui = await mountPane($, 'terminal')
   expect(await ui.find({ text: /└─ ✓ `a.ts` を読む/ })).toBeDefined()
-  expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
+  expect(await currentTab(ui)).toBe('ツリー')
+  await ui.unmount()
+})
+
+/** マップを見ているペインが出ていることにし、描き直しの依頼を数える */
+const watchMap = (on: On) => {
+  on('ui.panes', () => ({
+    value: [{ id: 'cc-work-log', title: '作業ログ', isShown: true, isFocused: false, isPlaced: true }],
+  }))
+  const redraws = { count: 0 }
+  // 数えたうえで先へ渡し、マウントしたペインを描き直させる(描き直しを止めるかは描く側が決めるため)
+  on('ui.invalidate', ($, e, next) => {
+    redraws.count += 1
+    return next(e)
+  })
+  return redraws
+}
+
+test('マップでは、組織図のようにサブエージェント2つの箱が並び、依頼の粒が流れる', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  watchMap(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `agent-${(n += 1)}` }))
+  await start($)
+
+  await spawnExplore($, 'w1')
+  await spawnExplore($, 'w2')
+  await clock.advance(400)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: surface === 'terminal' ? /^╭─ メイン/ : /^╭─ ◉ メイン/ })).toBeDefined()
+    // サブエージェントはドット絵にせず、文字の枝で描く。Raster はメインのキャラの1つだけ
+    expect(await ui.findAll({ type: 'Raster' })).toHaveLength(surface === 'terminal' ? 1 : 0)
+    expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#2' })).toBeDefined()
+    // 起動したての依頼の粒が、まだ道筋の上にいる
+    expect(await ui.find({ text: /●/ })).toBeDefined()
+    expect(await currentTab(ui)).toBe('マップ')
+    await ui.unmount()
+  }
+})
+
+test('マップは動いているあいだだけ描き直し、何も動いていなければ止まる', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  const redraws = watchMap(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  // 続けるか止めるかは描く側が決めるので、ペインを出しておく(まばたきの描き直しが混ざらないよう、デスクトップで)
+  const ui = await mountPane($, 'desktop')
+
+  // 実行中のサブエージェントがいるあいだは、TICK_MS ごとに描き直す
+  await spawnExplore($)
+  await clock.advance(1500)
+  expect(redraws.count).toBe(1500 / TICK_MS)
+
+  // 終えると、結果の粒が戻りきったところで止まる
+  await subTurn($, 'agent-1', 1000)
+  await clock.advance(5000)
+  const settled = redraws.count
+  await clock.advance(5000)
+  expect(redraws.count).toBe(settled)
+  expect(settled).toBeLessThan((1500 + 5000) / TICK_MS)
+
+  // 一覧に切り替えていれば、動きがあっても描き直さない
+  await ui.press({ key: 'view:list' })
+  expect(await currentTab(ui)).toBe('一覧')
+  const listed = redraws.count
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+  await clock.advance(1000)
+  expect(redraws.count).toBe(listed)
+  await ui.unmount()
+})
+
+test('依頼の区切りにするのは、人やプラグイン・予約が送った入力だけ', () => {
+  const requests = ['composer', 'bridge', 'sdk', 'channel', 'slack-ping', 'scheduled-trigger', 'plugin']
+  expect(requests.map(isNewRequest)).toEqual(requests.map(() => true))
+  // 完了の通知、エージェントどうしのメッセージ、エンジンが自分で入れる知らせなどは、同じ依頼の続き
+  const followUps = [
+    'task-notification',
+    'peer',
+    'peer-send-message',
+    'projects-relay',
+    'coordinator',
+    'observer',
+    'observer-activity',
+    'auto-continuation',
+    'unclassified',
+  ]
+  expect(followUps.map(isNewRequest)).toEqual(followUps.map(() => false))
+})
+
+test('マップの箱を押すと、そのサブエージェントのモデル・時間・トークン・作業・結果を出し、戻れる', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'agent-1' }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  await start($)
+
+  await spawnExplore($)
+  await $.turn.complete({
+    answer: 'a.ts にテストは3つあります',
+    durationMs: 8_000,
+    isAborted: false,
+    turnId: 'sub-1',
+    reason: 'answer',
+    agentId: 'agent-1',
+    usage: { model: 'claude-haiku-5-5', input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 3000, cache_creation_input_tokens: 0 },
+  })
+  const agent = (state.agents as Record<string, { tokens?: number; answer?: string }>)['agent-1']
+  expect([agent?.tokens, agent?.answer]).toEqual([4200, 'a.ts にテストは3つあります'])
+
+  const ui = await mountPane($, 'terminal')
+  expect(await ui.find({ text: /4\.2k tok/ })).toBeDefined()
+  await ui.press({ key: 'open:agent-1' })
+  expect(state.selected).toBe('agent-1')
+  expect(await ui.find({ text: /^#1 Explore · haiku-5-5 · ✓ 8秒 · 4\.2k トークン$/ })).toBeDefined()
+  expect(await ui.find({ text: /^頼まれたこと: テストを調べる$/ })).toBeDefined()
+  // したことの一覧(テストの $.tool.call では agentId を渡せないので、終えた行で確かめる)と、結果
+  expect(await ui.find({ text: /^したこと\(1 件\)$/ })).toBeDefined()
+  expect(await ui.find({ text: /✓ 作業を終えた\(回答した\(8秒\)\)$/ })).toBeDefined()
+  expect(await ui.find({ text: /^結果: a\.ts にテストは3つあります$/ })).toBeDefined()
+
+  await ui.press({ key: 'close-detail' })
+  expect(state.selected).toBe(null)
+  expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('新しい依頼を受けると、マップはその依頼のぶんに切り替わり、開いていた詳細を閉じる', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  await spawnExplore($)
+  await subTurn($, 'agent-1', 1000)
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'open:agent-1' })
+  expect(state.selected).toBe('agent-1')
+
+  // 完了の通知(ここでは出どころを変えられないので、関数で確かめている)ではなく、新しい依頼が来た
+  await clock.advance(1000)
+  await $.prompt.submit({ text: '次はこれをして' })
+  expect(typeof state.requestAt).toBe('number')
+  expect(state.selected).toBe(null)
+  expect(await ui.find({ type: 'Button', text: '#1' })).toBeUndefined()
+  expect(await ui.find({ text: /サブエージェントはいません/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('同じ id で起動し直したサブエージェントは、もとの番号を使い続ける', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  let n = 0
+  on('agent.spawn', ($, e) => ({ model: 'haiku', agentId: e.tool_use_id === 'again' ? 'agent-1' : `agent-${(n += 1)}` }))
+  await start($)
+
+  await spawnExplore($, 'w1')
+  await spawnExplore($, 'w2')
+  await spawnExplore($, 'again')
+  await spawnExplore($, 'w3')
+  const agents = state.agents as Record<string, { no: number }>
+  expect(Object.fromEntries(Object.entries(agents).map(([id, one]) => [id, one.no]))).toEqual({
+    'agent-1': 1,
+    'agent-2': 2,
+    'agent-3': 3,
+  })
+})
+
+test('詳細を開いていてもタブで切り替えられ、切り替えると詳細は閉じる', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  await spawnExplore($)
+  await subTurn($, 'agent-1', 1000)
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'open:agent-1' })
+  expect(await currentTab(ui)).toBe('マップ')
+  expect(await ui.find({ text: /^頼まれたこと:/ })).toBeDefined()
+
+  await ui.press({ key: 'view:list' })
+  expect(await currentTab(ui)).toBe('一覧')
+  expect(state.selected).toBe(null)
+  await ui.press({ key: 'view:map' })
+  expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
+  await ui.unmount()
+})
+
+
+test('幅の足りないペインでは、マップの代わりにそう出す', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  await start($)
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+
+  const ui = await mountPane($, 'terminal', 20)
+  expect(await ui.find({ text: /マップは幅 24 マス以上で出します/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('ターミナルでは、何も動いていないときも、キャラのまばたきの瞬間だけ描き直す', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  const redraws = watchMap(on)
+  await start($)
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+  await endTurn($)
+
+  const ui = await mountPane($, 'terminal')
+  const before = redraws.count
+  // まばたきの周期(BLINK_EVERY)の2周ぶんで、始まりと終わりの2回ずつ
+  await clock.advance(BLINK_EVERY * 2)
+  expect(redraws.count - before).toBe(4)
+  await ui.unmount()
+})
+
+test('ほかのフックが入力を取り下げたら、依頼の区切りにしない', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('prompt.submit', () => ({ drop: '取り下げた' }))
+  await start($)
+
+  await $.prompt.submit({ text: '取り下げられる入力' })
+  expect(state.requestAt).toBeUndefined()
+})
+
+test('同じ id で起動し直したサブエージェントのトークンは、各回を足す', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  const usage = (input: number) => ({
+    model: 'haiku',
+    input_tokens: input,
+    output_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  })
+  for (const input of [1000, 500]) {
+    await spawnExplore($)
+    await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'sub', reason: 'answer', agentId: 'agent-1', usage: usage(input) })
+  }
+  expect((state.agents as Record<string, { tokens?: number }>)['agent-1']?.tokens).toBe(1500)
+})
+
+test('サブエージェントがツールを使うと、最後に動いた時刻を覚える', async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  await spawnExplore($)
+  await clock.advance(5000)
+  // テストの $.tool.call では agentId を渡せないので、サブエージェントのターン終了の行で確かめる
+  await subTurn($, 'agent-1', 5000)
+  expect((state.agents as Record<string, { lastActiveAt?: number }>)['agent-1']?.lastActiveAt).toBe(clock.now())
+})
+
+test('デスクトップでは箱の中の番号をボタンにせず、詳細を開くボタンをマップの下に並べる', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `agent-${(n += 1)}` }))
+  await start($)
+  await spawnExplore($, 'w1')
+  await spawnExplore($, 'w2')
+
+  const ui = await mountPane($, 'desktop')
+  expect(await ui.find({ text: /^詳細:$/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Button' })).map(one => one.text).slice(3)).toEqual(['#1', '#2'])
+  // 箱の1行目は罫線とひと続きの文字のまま
+  expect(await ui.find({ text: /│ #1 Explore +│ │ #2 Explore +│/ })).toBeDefined()
+  await ui.press({ key: 'open:agent-2' })
+  expect(state.selected).toBe('agent-2')
   await ui.unmount()
 })

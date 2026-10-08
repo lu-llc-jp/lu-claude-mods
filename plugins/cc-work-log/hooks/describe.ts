@@ -147,3 +147,20 @@ export const summaryPrompt = (list: readonly WorkLogEntry[], agents: Record<stri
       return `- ${who}${one.text}${mark}`
     })
     .join('\n')
+
+/**
+ * 新しい依頼とみなす入力の出どころ。人が送ったもの(ターミナル・リモート・SDK・チャンネル・Slack)と、予約やプラグインが送ったもの。
+ * サブエージェントの完了の通知、エージェントどうしのメッセージ、エンジンが自分で入れる知らせ(unclassified)などは、同じ依頼の続き
+ */
+const REQUEST_KINDS: ReadonlySet<string> = new Set([
+  'composer',
+  'bridge',
+  'sdk',
+  'channel',
+  'slack-ping',
+  'scheduled-trigger',
+  'plugin',
+])
+
+/** 入力の出どころ(prompt.submit の origin.kind)が、メインへの新しい依頼か */
+export const isNewRequest = (kind: string): boolean => REQUEST_KINDS.has(kind)

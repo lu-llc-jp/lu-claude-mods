@@ -35,10 +35,20 @@ export type WorkLogAgent = {
   status?: WorkLogStatus
   /** 終えたときの所要時間(ms) */
   durationMs?: number
+  /** 起動した時刻(ms)。マップで依頼の粒を流すのに使う。0.3 以前に覚えたものには無い */
+  startedAt?: number
+  /** 終えた時刻(ms)。マップで結果の粒を流すのに使う。0.3 以前に覚えたものには無い */
+  endedAt?: number
+  /** 消費トークン(入力・出力・キャッシュの読み書きの合計)。同じ id で起動し直したものは、各回の合計。0.10 以前に覚えたものには無い */
+  tokens?: number
+  /** 終えたときの回答の先頭。マップの詳細に出す。0.10 以前に覚えたものには無い */
+  answer?: string
+  /** 最後にツールを使った時刻(ms)。長く動きの無い実行中のものを見分けるのに使う。0.13 以前に覚えたものには無い */
+  lastActiveAt?: number
 }
 
-/** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー */
-export type WorkLogView = 'list' | 'tree'
+/** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー、map: メインのカードの下にサブエージェントの箱を並べた組織図のアニメーション */
+export type WorkLogView = 'list' | 'tree' | 'map'
 
 /** 要約を止めたときの記録。同じモデルのあいだは要約しない */
 export type WorkLogSummaryStop = { model: string; reason: string }
@@ -54,6 +64,10 @@ declare module 'claude-code' {
       summaryStop: WorkLogSummaryStop | null
       /** ペインのボタンで選んだ見せ方。null なら /config の view に従う */
       view: WorkLogView | null
+      /** 直近のメインへの依頼(ユーザーの入力など)を受けた時刻(ms)。マップはこれより後に起動したものを出す。まだ無ければ null */
+      requestAt: number | null
+      /** マップで詳細を開いているサブエージェントの id。開いていなければ null */
+      selected: string | null
     }
   }
 }
