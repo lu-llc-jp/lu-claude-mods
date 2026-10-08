@@ -20,7 +20,16 @@ lu-llc が配布する [Claude Code](https://claude.com/claude-code) の mod(関
 マーケットプレイスの追加を聞かれたら `y`、続いてスコープ(通常はユーザー)を選びます。
 デスクトップアプリの Code タブではこのコマンドは使えません。ターミナルでユーザースコープに入れれば、そちらでも読み込まれます。
 
+## 要望・不具合の報告
+
+[issue](https://github.com/lu-llc-jp/lu-claude-mods/issues/new/choose) から、テンプレートを選んで送ってください。
+
+- **mod の要望**: こういう mod がほしい、この mod にこの機能がほしい
+- **不具合の報告**: mod が期待どおりに動かない
+
 ## 開発
+
+作業は issue → ブランチ → PR で進めます。詳しくは [CLAUDE.md](CLAUDE.md) の「進め方」を参照してください。
 
 mod は `plugins/<mod名>/` に1つずつ置きます。
 
