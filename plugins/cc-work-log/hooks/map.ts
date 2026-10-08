@@ -8,10 +8,6 @@ export const TICK_MS = 150
 export const FLIGHT_MS = 1200
 /** 結果の粒が届いてから、メインのカードが光っている時間(ms) */
 export const FLASH_MS = 900
-/** 起動したての名前を打ち出していく時間(ms) */
-export const TYPE_MS = 600
-/** 終えたサブエージェントを置いておく時間(ms)。ターンをまたいでも、この間は残す */
-export const RECENT_MS = 10 * 60_000
 /** 実行中を示すスピナーのコマ */
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 /** マップの幅の上限。広いペインでも線が間延びしないように止める */
@@ -25,6 +21,8 @@ const NODE_ROWS = 5
 const LINK_ROWS = 2
 /** 流れる光の間隔(マス) */
 const PULSE_GAP = 4
+/** キャラを入れたメインのカードの中の行数。キャラの Raster の高さ(clawd.ts の CLAWD_ROWS)と同じにする */
+const HUB_AVATAR_ROWS = 4
 
 /**
  * マップの1区切りの色分け。
@@ -56,10 +54,13 @@ export type MapTone =
   | 'timeLive'
   | 'note'
   | 'more'
-/** hue は type の色の番号(種類ごとに決まる) */
-export type MapSeg = { text: string; tone: MapTone; hue?: number }
-/** マップの1行。描く側は segs を色付きの Text にするだけ */
-export type MapLine = { key: string; segs: MapSeg[] }
+/** hue は type の色の番号(種類ごとに決まる)。press があれば、描く側はその区切りを押せるボタンにし、押すとそのエージェントの詳細を開く */
+export type MapSeg = { text: string; tone: MapTone; hue?: number; press?: string }
+/**
+ * マップの1行。描く側は segs を色付きの Text にするだけ。
+ * メインのカードの中の行は、キャラを置く隙間の左右を left・right にも分けて持つ(キャラを描ける面はそのあいだに Raster を置く)
+ */
+export type MapLine = { key: string; segs: MapSeg[]; left?: MapSeg[]; right?: MapSeg[] }
 
 /** 種類の色の数。描く側はこの数だけ色を用意する */
 export const TYPE_HUES = 6
@@ -153,7 +154,11 @@ const order = (ids: readonly string[], agents: Record<string, WorkLogAgent>): Ar
   return out
 }
 
-const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLogAgent>, now: number): Scene => {
+/**
+ * マップに描くものを組み立てる。置くのは、直近の依頼(since)より後に起動したものと、まだ実行中のもの。
+ * since が null(まだ依頼を受けていない)なら、覚えているものをすべて置く
+ */
+const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLogAgent>, since: number | null): Scene => {
   const last = splitTurns(list).at(-1)
   const spawnIds = new Set<string>()
   for (const id of Object.keys(agents)) {
@@ -170,9 +175,8 @@ const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLo
     const startedAt = agent.startedAt ?? list.find(one => one.id === agent.spawnEntryId)?.at
     const endedAt =
       agent.endedAt ?? (status === 'running' ? undefined : list.find(one => one.kind === 'turn' && one.agentId === id)?.at)
-    // 終えたものは、終えてから RECENT_MS のあいだだけ置く。完了の通知でターンが進んでも消えないよう、ターンではなく時刻で決める
-    const settledAt = endedAt ?? startedAt
-    if (status !== 'running' && !(settledAt !== undefined && now - settledAt < RECENT_MS)) continue
+    // 前の依頼で起動して終えたものは置かない。完了の通知でターンが進んでも、次の依頼までは残る
+    if (status !== 'running' && since !== null && !(startedAt !== undefined && startedAt >= since)) continue
     items.set(id, {
       id,
       agent,
@@ -215,8 +219,13 @@ const flashing = (items: readonly Item[], now: number): boolean =>
  * メインのキャラの様子。flash: 結果が届いた、busy: ツールを使っている、thinking: 考えている、done・error: ターンを終えた
  */
 export type MainMood = 'flash' | 'busy' | 'thinking' | 'done' | 'error'
-export const mainMood = (list: readonly WorkLogEntry[], agents: Record<string, WorkLogAgent>, now: number): MainMood => {
-  const { main, items } = buildScene(list, agents, now)
+export const mainMood = (
+  list: readonly WorkLogEntry[],
+  agents: Record<string, WorkLogAgent>,
+  now: number,
+  since: number | null = null,
+): MainMood => {
+  const { main, items } = buildScene(list, agents, since)
   if (flashing(items, now)) return 'flash'
   if (main.status === 'running') return main.tool === undefined ? 'thinking' : 'busy'
   return main.status === 'ok' ? 'done' : 'error'
@@ -230,8 +239,9 @@ export const isMapAnimating = (
   list: readonly WorkLogEntry[],
   agents: Record<string, WorkLogAgent>,
   now: number,
+  since: number | null = null,
 ): boolean => {
-  const scene = buildScene(list, agents, now)
+  const scene = buildScene(list, agents, since)
   return (
     scene.main.tool !== undefined ||
     flashing(scene.items, now) ||
@@ -244,20 +254,21 @@ export const isMapAnimating = (
 // ---- 描く ----
 
 /** 1マス。2マスの文字の右隣は text '' で埋める */
-type Cell = { text: string; tone: MapTone; hue?: number }
-type Row = { key: string; cells: Cell[]; tail: MapSeg[] }
+type Cell = { text: string; tone: MapTone; hue?: number; press?: string }
+/** slot: キャラを置く隙間(列 at から width 列)。描く側はそこに Raster を重ねる */
+type Row = { key: string; cells: Cell[]; tail: MapSeg[]; slot?: { at: number; width: number } }
 
-const put = (row: Row, col: number, text: string, tone: MapTone, hue?: number) => {
+const put = (row: Row, col: number, text: string, tone: MapTone, hue?: number, press?: string) => {
   while (row.cells.length <= col) row.cells.push({ text: ' ', tone: 'edge' })
-  row.cells[col] = hue === undefined ? { text, tone } : { text, tone, hue }
+  row.cells[col] = { text, tone, ...(hue === undefined ? {} : { hue }), ...(press === undefined ? {} : { press }) }
 }
 
 /** col から文字列を1マスずつ置き、次の列を返す。2マスの文字は右隣を空にする */
-const putText = (row: Row, col: number, text: string, tone: MapTone, hue?: number): number => {
+const putText = (row: Row, col: number, text: string, tone: MapTone, hue?: number, press?: string): number => {
   let at = col
   for (const ch of text) {
-    put(row, at, ch, tone, hue)
-    if (cellWidth(ch) === 2) put(row, at + 1, '', tone, hue)
+    put(row, at, ch, tone, hue, press)
+    if (cellWidth(ch) === 2) put(row, at + 1, '', tone, hue, press)
     at += cellWidth(ch)
   }
   return at
@@ -275,22 +286,30 @@ export const hueOf = (type: string): number => {
   return sum % TYPE_HUES
 }
 
-/** メインのカード(4行)。上の枠に見出しとモデル、中に今の様子とサブエージェントの数 */
-/** trunkAt: 下の枠に付け根 ┬ を付ける列(付けないなら undefined)。withMark: 見出しに ◉ を付ける(キャラを横に描くときは付けない) */
+/** 消費トークンを短く書く。850、12.3k、1.2M */
+export const formatTokens = (n: number): string =>
+  n < 1000 ? String(n) : n < 1_000_000 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(1)}M`
+
+/**
+ * メインのカード。上の枠に見出しとモデル、中に今の様子・サブエージェントの数・トークンの合計。
+ * avatar > 0 なら、中の左に avatar 列のキャラの隙間を空け(行は avatar の高さ CLAWD_ROWS ぶん)、見出しの ◉ は付けない。
+ * trunkAt: 下の枠に付け根 ┬ を付ける列(付けないなら undefined)
+ */
 const hubRows = (
   scene: Scene,
   mainModel: string,
   width: number,
   now: number,
   trunkAt: number | undefined,
-  withMark: boolean,
+  avatar: number,
 ): Row[] => {
   const { main, items } = scene
   const tone: MapTone = flashing(items, now) ? 'hubFlash' : main.status === 'running' ? 'hub' : 'hubIdle'
-  const inner = width - 4
+  const textAt = avatar > 0 ? 2 + avatar + 1 : 2
+  const inner = width - textAt - 2
 
   const top: Row = { key: 'hub:top', cells: [], tail: [] }
-  let col = putText(top, 0, withMark ? '╭─ ◉ ' : '╭─ ', tone)
+  let col = putText(top, 0, avatar > 0 ? '╭─ ' : '╭─ ◉ ', tone)
   col = putText(top, col, 'メイン', 'title')
   const model = mainModel === '' ? '' : ` ${shortModel(mainModel)} `
   col = putText(top, col, ` ${'─'.repeat(Math.max(0, width - col - cellWidth(model) - 3))}`, tone)
@@ -298,8 +317,10 @@ const hubRows = (
   putText(top, col, '─╮', tone)
 
   const body = (key: string, segs: MapSeg[]): Row => {
-    const row: Row = { key, cells: [], tail: [] }
-    let at = putText(row, 0, '│ ', tone)
+    const row: Row = { key, cells: [], tail: [], ...(avatar > 0 ? { slot: { at: 2, width: avatar } } : {}) }
+    putText(row, 0, '│ ', tone)
+    // キャラの隙間と、その右の1列の余白
+    let at = putText(row, 2, ' '.repeat(textAt - 2), 'edge')
     let room = inner
     for (const seg of segs) {
       const text = fit(seg.text, room)
@@ -336,57 +357,47 @@ const hubRows = (
           { text: `✓ ${ok} 完了`, tone: ok > 0 ? 'ok' : 'more' },
           ...(ng > 0 ? [{ text: '  ', tone: 'edge' as const }, { text: `✗ ${ng} 失敗`, tone: 'error' as const }] : []),
         ]
+  const spent = items.reduce((sum, item) => sum + (item.agent.tokens ?? 0), 0)
+  const total: MapSeg[] = spent === 0 ? [] : [{ text: `サブエージェントのトークン ${formatTokens(spent)}`, tone: 'note' }]
 
   const bottom: Row = { key: 'hub:bottom', cells: [], tail: [] }
   putText(bottom, 0, `╰${'─'.repeat(width - 2)}╯`, tone)
   if (trunkAt !== undefined) put(bottom, trunkAt, '┬', tone)
 
-  return [top, body('hub:now', doing), body('hub:count', count), bottom]
+  const inside = [doing, count, total]
+  // キャラを置くなら、その高さぶん中の行を取る(キャラは上に1行の余白を持つので、文字はその余白の行から始める)
+  while (avatar > 0 && inside.length < HUB_AVATAR_ROWS) inside.push([])
+  return [top, ...inside.map((segs, i) => body(`hub:in:${i}`, segs)), bottom]
 }
 
-/** 箱の1行目: 番号と種類。メインと違うモデルは、入るときだけ添える */
-const titleSegs = (item: Item, mainModel: string, room: number): MapSeg[] => {
+/** 箱の1行目: 番号と種類。押すとそのエージェントの詳細を開く */
+const titleSegs = (item: Item, room: number): MapSeg[] => {
   const { agent } = item
   const no = `#${agent.no} `
-  const type = shortType(agent.type)
-  const model = agent.model !== '' && shortModel(agent.model) !== shortModel(mainModel) ? `·${shortModel(agent.model)}` : ''
   return [
-    { text: no, tone: 'no' },
-    { text: fit(type, room - cellWidth(no)), tone: 'type', hue: hueOf(agent.type) },
-    ...(model !== '' && cellWidth(no + type + model) <= room ? [{ text: model, tone: 'note' as const }] : []),
+    { text: no, tone: 'no', press: item.id },
+    { text: fit(shortType(agent.type), room - cellWidth(no)), tone: 'type', hue: hueOf(agent.type), press: item.id },
   ]
 }
 
-/** 箱の下の枠に添える時間。実行中は経過時間、終えたら所要時間 */
-const timeSeg = (item: Item, now: number): MapSeg | undefined => {
+/** 箱の2行目: 使っているモデル */
+const modelSegs = (item: Item): MapSeg[] =>
+  item.agent.model === '' ? [{ text: 'モデル不明', tone: 'more' }] : [{ text: shortModel(item.agent.model), tone: 'note' }]
+
+/** 箱の3行目: 様子と時間。実行中はスピナーと経過時間、終えたら ✓ と所要時間 */
+const statusSegs = (item: Item, now: number): MapSeg[] => {
   const { agent } = item
-  if (item.status !== 'running') return agent.durationMs === undefined ? undefined : { text: seconds(agent.durationMs), tone: 'note' }
-  return item.startedAt === undefined ? undefined : { text: seconds(Math.max(0, now - item.startedAt)), tone: 'timeLive' }
-}
-
-/** 箱の2行目: 頼まれたこと。起動したては1文字ずつ打ち出す */
-const nameSegs = (item: Item, room: number, now: number): MapSeg[] => {
-  const done = item.status !== 'running'
-  const typing = !done && item.startedAt !== undefined && now - item.startedAt < TYPE_MS
-  const chars = [...item.agent.name]
-  const shown = typing
-    ? chars.slice(0, Math.ceil((chars.length * Math.max(0, now - (item.startedAt ?? now))) / TYPE_MS)).join('')
-    : item.agent.name
-  return [
-    { text: fit(shown, room - (typing ? 1 : 0)), tone: done ? 'labelDone' : 'label' },
-    ...(typing ? [{ text: '▍', tone: 'cursor' as const }] : []),
-  ]
-}
-
-/** 箱の3行目: 今していること、または結果 */
-const activitySegs = (item: Item, room: number, now: number): MapSeg[] => {
   if (item.status === 'running') {
+    const elapsed = item.startedAt === undefined ? '' : seconds(Math.max(0, now - item.startedAt))
     return [
       { text: `${spinner(now)} `, tone: 'spin' },
-      { text: fit(item.tool ?? '考えています', room - 2), tone: 'tool' },
+      { text: elapsed === '' ? '作業中' : elapsed, tone: 'timeLive' },
     ]
   }
-  return item.status === 'ok' ? [{ text: '✓ 回答した', tone: 'ok' }] : [{ text: fit('✗ 中断・エラー', room), tone: 'error' }]
+  const took = agent.durationMs === undefined ? '' : ` ${seconds(agent.durationMs)}`
+  return item.status === 'ok'
+    ? [{ text: `✓${took}`, tone: 'ok' }]
+    : [{ text: `✗${took}`, tone: 'error' }]
 }
 
 /** 箱の枠の色。実行中は目立たせ、終えたら沈める。終えた瞬間は緑に光り、失敗は赤 */
@@ -429,9 +440,11 @@ type Node = { item: Item; children: Node[]; x: number; width: number; center: nu
  * サブエージェントが起動したものは、親の箱の下に同じように並べる。箱は起動した順に左から置く。
  * 親から子へは、親の下から線を下ろして横に分け、子の箱の上へ下ろす。
  * 実行中の線には光が流れ、起動したては依頼の粒が親から子へ、終えたては結果の粒が子から親へ流れる。
- * 置くのは、実行中のものと、終えてから RECENT_MS 以内のもの。
+ * 箱には、番号と種類(押すと詳細を開く)・モデル・様子と時間を出し、下の枠に消費トークンを載せる。
+ * 置くのは、直近の依頼(since)より後に起動したものと、まだ実行中のもの。
  * 横か縦に入りきらなければ、終えたもの(古い順)、新しいもの、の順に省く。
- * 先頭の4行(key が hub: で始まる)がメインのカード。avatar > 0 なら、描く側がカードの左に avatar 列のキャラを置く
+ * 先頭の行(key が hub: で始まる)がメインのカード。avatar > 0 なら、カードの中の左に avatar 列のキャラの隙間を空け、
+ * 中の行(key が hub:in: で始まる)の left・right に隙間の左右を分けて持たせる
  */
 export const layoutMap = (
   list: readonly WorkLogEntry[],
@@ -440,9 +453,10 @@ export const layoutMap = (
   now: number,
   rows: number,
   columns: number,
-  avatar = 0,
+  { avatar = 0, since = null }: { avatar?: number; since?: number | null } = {},
 ): MapLine[] => {
-  const scene = buildScene(list, agents, now)
+  const scene = buildScene(list, agents, since)
+  const hubHeight = avatar > 0 ? 2 + HUB_AVATAR_ROWS : 5
   const width = Math.max(24, Math.min(columns, HUB_MAX))
   let kept = scene.items.map(item => item.id)
   let omitted = 0
@@ -467,7 +481,7 @@ export const layoutMap = (
   const fits = (): boolean => {
     const items = placed()
     const levels = items.reduce((max, item) => Math.max(max, item.depth + 1), 0)
-    const height = 4 + levels * (LINK_ROWS + NODE_ROWS) + (omitted > 0 ? 1 : 0)
+    const height = hubHeight + levels * (LINK_ROWS + NODE_ROWS) + (omitted > 0 ? 1 : 0)
     return height <= rows && leaves(items) * (NODE_MIN + 1) - 1 <= width
   }
   const byNo = (id: string) => agentOf(agents, id)?.no ?? 0
@@ -519,15 +533,14 @@ export const layoutMap = (
   }
   const forest = roots.reduce((sum, root) => sum + span(root), 0) + Math.max(0, roots.length - 1)
   // メインの付け根は、カードの真ん中。子の並びもそこを中心に置く
-  const hubWidth = width - avatar
-  const rootCenter = avatar + Math.floor(hubWidth / 2)
+  const rootCenter = Math.floor(width / 2)
   let x = Math.max(0, Math.min(width - forest, rootCenter - Math.floor(forest / 2)))
   for (const root of roots) {
     place(root, x)
     x += span(root) + 1
   }
 
-  const out: Row[] = hubRows(scene, mainModel, hubWidth, now, roots.length > 0 ? rootCenter - avatar : undefined, avatar === 0)
+  const out: Row[] = hubRows(scene, mainModel, width, now, roots.length > 0 ? rootCenter : undefined, avatar)
   const rowAt = (r: number): Row => {
     while (out.length <= r) out.push({ key: `row:${out.length}`, cells: [], tail: [] })
     return out[r] as Row
@@ -565,22 +578,23 @@ export const layoutMap = (
       if (joinAt !== undefined) put(row, joinAt, join, tone)
     }
     border(top, '╭', '╮', node.center, '┴')
-    const lines = [titleSegs(item, mainModel, inner), nameSegs(item, inner, now), activitySegs(item, inner, now)]
+    const lines = [titleSegs(item, inner), modelSegs(item), statusSegs(item, now)]
     lines.forEach((segs, i) => {
       const row = rowAt(top + 1 + i)
       let at = putText(row, node.x, '│ ', tone)
       let room = inner
       for (const seg of segs) {
         const text = fit(seg.text, room)
-        at = putText(row, at, text, seg.tone, seg.hue)
+        at = putText(row, at, text, seg.tone, seg.hue, seg.press)
         room -= cellWidth(text)
       }
       at = putText(row, at, ' '.repeat(Math.max(0, room)), 'edge')
       putText(row, at, ' │', tone)
     })
     border(top + NODE_ROWS - 1, '╰', '╯', node.children.length > 0 ? node.center : undefined, '┬')
-    // 時間は下の枠の右寄りに、前後に空白を置いて載せる
-    const time = timeSeg(item, now)
+    // 消費トークンは下の枠の右寄りに、前後に空白を置いて載せる(終えてから分かる)
+    const time: MapSeg | undefined =
+      item.agent.tokens === undefined ? undefined : { text: `${formatTokens(item.agent.tokens)} tok`, tone: 'note' }
     if (time !== undefined) {
       const row = rowAt(top + NODE_ROWS - 1)
       const w = cellWidth(time.text)
@@ -597,7 +611,7 @@ export const layoutMap = (
     }
   }
 
-  const level = (depth: number) => 4 + depth * (LINK_ROWS + NODE_ROWS)
+  const level = (depth: number) => hubHeight + depth * (LINK_ROWS + NODE_ROWS)
   if (roots.length > 0) link(rootCenter, level(0), roots)
   const walk = (node: Node) => {
     const top = level(node.item.depth) + LINK_ROWS
@@ -641,12 +655,23 @@ export const layoutMap = (
 }
 
 /** マスと後ろの文を、同じ色の続きでまとめた区切りにする */
-const toLine = (row: Row): MapLine => {
+const toSegs = (cells: readonly (Cell | MapSeg)[]): MapSeg[] => {
   const segs: MapSeg[] = []
-  for (const one of [...row.cells, ...row.tail]) {
+  for (const one of cells) {
     const prev = segs.at(-1)
-    if (prev !== undefined && prev.tone === one.tone && prev.hue === one.hue) prev.text += one.text
+    if (prev !== undefined && prev.tone === one.tone && prev.hue === one.hue && prev.press === one.press) prev.text += one.text
     else segs.push({ ...one })
   }
-  return { key: row.key, segs }
+  return segs
+}
+
+const toLine = (row: Row): MapLine => {
+  const all = [...row.cells, ...row.tail]
+  const line: MapLine = { key: row.key, segs: toSegs(all) }
+  if (row.slot === undefined) return line
+  return {
+    ...line,
+    left: toSegs(all.slice(0, row.slot.at)),
+    right: toSegs(all.slice(row.slot.at + row.slot.width)),
+  }
 }

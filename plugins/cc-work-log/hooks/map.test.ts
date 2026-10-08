@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { WorkLogAgent, WorkLogEntry } from '../types'
-import { FLASH_MS, FLIGHT_MS, RECENT_MS, TICK_MS, TYPE_MS, cellWidth, fit, isMapAnimating, layoutMap, mainMood, type MapLine } from './map'
+import { FLASH_MS, FLIGHT_MS, TICK_MS, cellWidth, fit, formatTokens, isMapAnimating, layoutMap, mainMood, type MapLine } from './map'
 
 const T0 = 1_000_000
 /** 起動から十分たち、粒も打ち出しも終わっている時刻。光の位置がそろうよう TICK_MS の倍数にする */
@@ -39,6 +39,7 @@ const running = { 'agent-1': agent(1), 'agent-2': agent(2) }
 /** 色分けを外し、文字だけにして比べる */
 const draw = (lines: readonly MapLine[]): string[] => lines.map(line => line.segs.map(seg => seg.text).join('').trimEnd())
 /** スピナーのコマを * にそろえる */
+const plain = (segs: readonly { text: string }[] | undefined): string => (segs ?? []).map(seg => seg.text).join('')
 const still = (lines: readonly string[]): string[] => lines.map(line => line.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '*'))
 /** その色の区切りの文字を集める */
 const toned = (lines: readonly MapLine[], tone: string): string[] =>
@@ -51,18 +52,24 @@ test('組織図のように、メインのカードの下に子の箱を横に�
     '╭─ ◉ メイン ──────────────── opus-5-5 ─╮',
     '│ … 考えています                       │',
     '│ * 2 動作中  ✓ 0 完了                 │',
+    '│                                      │',
     '╰───────────────────┬──────────────────╯',
     '          ╭─────────┴─────────╮',
     '          │                   │',
     ' ╭────────┴────────╮ ╭────────┴────────╮',
     ' │ #1 Explore      │ │ #2 Explore      │',
-    ' │ 調べる1         │ │ 調べる2         │',
-    ' │ * 「TODO」を検… │ │ * 考えています  │',
-    ' ╰─────────── 9秒 ─╯ ╰─────────── 9秒 ─╯',
+    ' │ haiku-5-5       │ │ haiku-5-5       │',
+    ' │ * 9秒           │ │ * 9秒           │',
+    ' ╰─────────────────╯ ╰─────────────────╯',
   ])
-  // 箱の1行目には、メインと違うモデルを入るときだけ添える
-  const wide = draw(layoutMap(twoAgents(), running, 'claude-opus-5-5', LATER, 30, 60))
-  expect(wide.some(line => line.includes('#1 Explore·haiku-5-5'))).toBe(true)
+  // 箱の1行目(番号と種類)は押せる。押すとそのエージェントの詳細を開く
+  const title = layoutMap(twoAgents(), running, '', LATER, 30, 40)[8]
+  expect(title?.segs.filter(seg => seg.press !== undefined).map(seg => [seg.text, seg.press])).toEqual([
+    ['#1 ', 'agent-1'],
+    ['Explore', 'agent-1'],
+    ['#2 ', 'agent-2'],
+    ['Explore', 'agent-2'],
+  ])
 })
 
 test('サブエージェントが起動したものは、親の箱の下に並べる', () => {
@@ -72,33 +79,32 @@ test('サブエージェントが起動したものは、親の箱の下に並�
     'agent-3': agent(3, { parentId: 'agent-1', type: 'Plan', model: '' }),
     'agent-4': agent(4, { parentId: 'agent-1', type: 'Plan', model: '' }),
   }
-  expect(still(draw(layoutMap(twoAgents(), agents, 'claude-haiku-5-5', LATER, 40, 60))).slice(4)).toEqual([
+  expect(still(draw(layoutMap(twoAgents(), agents, 'claude-haiku-5-5', LATER, 40, 60))).slice(5)).toEqual([
     '                    ╭─────────┴───────────────────╮',
     '                    │                             │',
     '           ╭────────┴────────╮           ╭────────┴────────╮',
     '           │ #1 Explore      │           │ #2 Explore      │',
-    '           │ 調べる1         │           │ 調べる2         │',
-    '           │ * 「TODO」を検… │           │ * 考えています  │',
-    '           ╰────────┬── 9秒 ─╯           ╰─────────── 9秒 ─╯',
+    '           │ haiku-5-5       │           │ haiku-5-5       │',
+    '           │ * 9秒           │           │ * 9秒           │',
+    '           ╰────────┬────────╯           ╰─────────────────╯',
     '          ╭─────────┴─────────╮',
     '          │                   │',
     ' ╭────────┴────────╮ ╭────────┴────────╮',
     ' │ #3 Plan         │ │ #4 Plan         │',
-    ' │ 調べる3         │ │ 調べる4         │',
-    ' │ * 考えています  │ │ * 考えています  │',
-    ' ╰─────────── 9秒 ─╯ ╰─────────── 9秒 ─╯',
+    ' │ モデル不明      │ │ モデル不明      │',
+    ' │ * 9秒           │ │ * 9秒           │',
+    ' ╰─────────────────╯ ╰─────────────────╯',
   ])
 })
 
-test('起動したては、依頼の粒が親から子の箱へ流れ、説明を打ち出していく', () => {
+test('起動したては、依頼の粒が親から子の箱へ流れる', () => {
   const at = (ms: number) => layoutMap(twoAgents(), running, '', T0 + ms, 30, 40)
 
   // 粒はメインの付け根の下から出て、横に分かれ、子の箱の上へ下りる
-  expect(draw(at(0))[4]?.indexOf('●')).toBe(20)
-  expect(draw(at(FLIGHT_MS - 1))[5]).toMatch(/●/)
+  expect(draw(at(0))[5]?.indexOf('●')).toBe(20)
+  expect(draw(at(FLIGHT_MS - 1))[6]).toMatch(/●/)
   expect(toned(at(FLIGHT_MS), 'flow')).toEqual([])
   expect(toned(at(FLIGHT_MS / 2), 'flowTrail').length).toBeGreaterThan(0)
-  expect(draw(at(TYPE_MS / 2))[8]).toMatch(/│ 調べ▍ +│/)
 })
 
 test('実行中の線には光が流れ、終えると箱が ✓ になって、結果の粒が親へ戻り、届くとカードが光る', () => {
@@ -106,17 +112,19 @@ test('実行中の線には光が流れ、終えると箱が ✓ になって、
   expect(lit(LATER)).toBeGreaterThan(0)
 
   const end = T0 + 12_000
-  const done = { ...running, 'agent-1': agent(1, { status: 'ok', durationMs: 12_000, endedAt: end }) }
+  const done = { ...running, 'agent-1': agent(1, { status: 'ok', durationMs: 12_000, endedAt: end, tokens: 12_345 }) }
   const list = twoAgents().map(one => (one.id === 'a1' ? { ...one, status: 'ok' as const } : one))
   const at = (ms: number) => layoutMap(list, done, '', end + ms, 30, 40)
 
-  expect(draw(at(0))[9]).toMatch(/│ ✓ 回答した +│/)
-  expect(draw(at(0))[10]).toMatch(/12秒/)
+  // 様子は ✓ と所要時間、消費トークンは下の枠、メインのカードにはその合計
+  expect(draw(at(0))[10]).toMatch(/^ │ ✓ 12秒 +│/)
+  expect(draw(at(0))[11]).toMatch(/^ ╰─+ 12\.3k tok ─╯/)
+  expect(draw(at(0))[3]).toMatch(/サブエージェントのトークン 12\.3k/)
   // 終えた瞬間は箱の枠が光る
-  expect(at(0)[6]?.segs.some(seg => seg.tone === 'hubFlash')).toBe(true)
+  expect(at(0)[7]?.segs.some(seg => seg.tone === 'hubFlash')).toBe(true)
   // 結果の粒は、子の箱の上から出て、メインの付け根へ戻る
-  expect(draw(at(0))[5]).toMatch(/◆/)
-  expect(draw(at(FLIGHT_MS - 1))[4]?.indexOf('◆')).toBe(20)
+  expect(draw(at(0))[6]).toMatch(/◆/)
+  expect(draw(at(FLIGHT_MS - 1))[5]?.indexOf('◆')).toBe(20)
   // 届くとメインのカードが光り、しばらくして戻る
   expect(at(FLIGHT_MS)[0]?.segs[0]?.tone).toBe('hubFlash')
   expect(at(FLIGHT_MS + FLASH_MS)[0]?.segs[0]?.tone).toBe('hub')
@@ -148,29 +156,42 @@ test('横か縦に入りきらなければ、終えたもの(古い順)、新し
   expect(draw(layoutMap([], nested, '', LATER, 12, 72)).some(line => line.includes('#6'))).toBe(false)
 })
 
-test('終えたものは、ターンが進んでも RECENT_MS のあいだ残し、何もいなければカードだけ出す', () => {
-  const done = { 'agent-1': agent(1, { status: 'ok', durationMs: 1000, endedAt: T0 + 500 }) }
-  const list = [
-    entry('call-1', '起動', T0),
-    entry('turn:t1', '回答した(2秒)', T0 + 1000, { kind: 'turn' }),
-    entry('r1', '`a.ts` を読む', T0 + 2000),
-  ]
+test('置くのは直近の依頼より後に起動したものと、まだ実行中のもの。次の依頼までは、終えたものも残す', () => {
+  const agents = {
+    'agent-1': agent(1, { status: 'ok', durationMs: 1000, startedAt: T0, endedAt: T0 + 1000 }),
+    'agent-2': agent(2, { startedAt: T0 }),
+    'agent-3': agent(3, { status: 'ok', durationMs: 1000, startedAt: T0 + 5000, endedAt: T0 + 6000 }),
+  }
+  const nos = (since: number | null, now: number) =>
+    draw(layoutMap([], agents, '', now, 30, 72, { since })).flatMap(line => [...line.matchAll(/#(\d)/g)].map(m => m[1]))
 
-  expect(draw(layoutMap(list, done, '', T0 + 60_000, 30, 40)).some(line => line.includes('#1 Explore'))).toBe(true)
-  const gone = draw(layoutMap(list, done, '', T0 + 500 + RECENT_MS, 30, 40))
-  expect(gone).toHaveLength(4)
-  expect(gone[2]).toMatch(/サブエージェントはいません/)
-  expect(gone[3]).toMatch(/^╰─+╯$/)
+  // 依頼(T0 + 3000)の前に終えた #1 は消え、前に起動してまだ動いている #2 は残る
+  expect(nos(T0 + 3000, T0 + 60_000)).toEqual(['2', '3'])
+  // 依頼がまだ無ければ、覚えているものをすべて置く
+  expect(nos(null, T0 + 60_000)).toEqual(['1', '2', '3'])
+  // 何もいなければ、メインのカードだけ
+  const empty = draw(layoutMap([], {}, '', T0, 30, 40))
+  expect(empty).toHaveLength(5)
+  expect(empty[2]).toMatch(/サブエージェントはいません/)
 })
 
-test('avatar を渡すと、メインのカードをその幅だけ狭めて ◉ を外し、付け根はカードの真ん中に付ける', () => {
-  const lines = draw(layoutMap(twoAgents(), running, 'claude-opus-5-5', LATER, 30, 40, 10))
+test('avatar を渡すと、メインのカードの中の左にキャラの隙間を空け、隙間の左右を分けて持たせる', () => {
+  const lines = layoutMap(twoAgents(), running, 'claude-opus-5-5', LATER, 40, 40, { avatar: 9 })
+  const text = draw(lines)
 
-  expect(lines[0]).toMatch(/^╭─ メイン ─+ opus-5-5 ─╮$/)
-  expect(lines.slice(0, 4).every(line => cellWidth(line) === 30)).toBe(true)
-  // カードは描く側が 10 列ずらして置くので、付け根はカードの中の 15 列目、線は全体の 25 列目から下りる
-  expect(lines[3]?.indexOf('┬')).toBe(15)
-  expect([...(lines[4] ?? '')].indexOf('┴')).toBe(25)
+  expect(text[0]).toMatch(/^╭─ メイン ─+ opus-5-5 ─╮$/)
+  const inside = lines.filter(line => line.key.startsWith('hub:in:'))
+  expect(inside).toHaveLength(4)
+  expect(inside.map(line => plain(line.left))).toEqual(['│ ', '│ ', '│ ', '│ '])
+  expect(still(inside.map(line => plain(line.right).trimEnd()))).toEqual([
+    ' … 考えています             │',
+    ' * 2 動作中  ✓ 0 完了       │',
+    '                            │',
+    '                            │',
+  ])
+  expect(text.slice(0, 6).every(line => cellWidth(line) === 40)).toBe(true)
+  // 付け根はカードの真ん中
+  expect(text[5]?.indexOf('┬')).toBe(20)
 })
 
 test('文字幅は日本語を2マスと数え、はみ出すぶんは … にする', () => {
@@ -199,4 +220,8 @@ test('メインのキャラの様子は、結果が届いた・ツールを使�
   expect(mainMood(twoAgents(), done, end + FLIGHT_MS)).toBe('flash')
   const finished = [...twoAgents(), entry('turn:t1', '回答した(2秒)', T0 + 1000, { kind: 'turn', status: 'ok' })]
   expect(mainMood(finished, {}, LATER)).toBe('done')
+})
+
+test('消費トークンは、850・12.3k・1.2M のように短く書く', () => {
+  expect([formatTokens(850), formatTokens(12_345), formatTokens(1_234_567)]).toEqual(['850', '12.3k', '1.2M'])
 })

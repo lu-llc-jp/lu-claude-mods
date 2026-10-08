@@ -39,6 +39,10 @@ export type WorkLogAgent = {
   startedAt?: number
   /** 終えた時刻(ms)。マップで結果の粒を流すのに使う。0.3 以前に覚えたものには無い */
   endedAt?: number
+  /** 終えたときの消費トークン(入力・出力・キャッシュの読み書きの合計)。0.10 以前に覚えたものには無い */
+  tokens?: number
+  /** 終えたときの回答の先頭。マップの詳細に出す。0.10 以前に覚えたものには無い */
+  answer?: string
 }
 
 /** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー、map: メインのカードの下にサブエージェントの箱を並べた組織図のアニメーション */
@@ -58,6 +62,10 @@ declare module 'claude-code' {
       summaryStop: WorkLogSummaryStop | null
       /** ペインのボタンで選んだ見せ方。null なら /config の view に従う */
       view: WorkLogView | null
+      /** 直近のメインへの依頼(ユーザーの入力など)を受けた時刻(ms)。マップはこれより後に起動したものを出す。まだ無ければ null */
+      requestAt: number | null
+      /** マップで詳細を開いているサブエージェントの id。開いていなければ null */
+      selected: string | null
     }
   }
 }

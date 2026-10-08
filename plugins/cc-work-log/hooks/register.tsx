@@ -11,13 +11,15 @@ import {
   describeSpawn,
   describeTool,
   describeTurnEnd,
+  isNewRequest,
   oneLine,
   resolveSummaryModel,
+  seconds,
   shortModel,
   summaryPrompt,
 } from './describe'
 import { CLAWD_COLUMNS, clawdFrame } from './clawd'
-import { TICK_MS, isMapAnimating, layoutMap, mainMood, type MapLine, type MapTone } from './map'
+import { TICK_MS, formatTokens, hueOf, isMapAnimating, layoutMap, mainMood, type MapLine, type MapSeg, type MapTone } from './map'
 import { layoutTree, type TreeLine } from './tree'
 
 const PANE = 'cc-work-log'
@@ -32,6 +34,8 @@ const summaryStop = atom(
   null as WorkLogSummaryStop | null,
 )
 const viewAtom = atom({ plugin: 'cc-work-log', key: 'view' } as const, null as WorkLogView | null)
+const requestAtom = atom({ plugin: 'cc-work-log', key: 'requestAt' } as const, null as number | null)
+const selectedAtom = atom({ plugin: 'cc-work-log', key: 'selected' } as const, null as string | null)
 
 const push = async ($: EngineInterface, entry: Omit<WorkLogEntry, 'at'>): Promise<void> => {
   const at = await $.clock.now()
@@ -67,7 +71,9 @@ const tick = async ($: EngineInterface, configView: WorkLogView): Promise<void> 
   }
   // 止めるときも1回描き直し、最後の様子(粒が届いた・点が ✓ になった)を残す
   $.ui.invalidate('ui.render')
-  if (!isMapAnimating(await read($, entries), await read($, agents), await $.clock.now())) stopTicker()
+  if (!isMapAnimating(await read($, entries), await read($, agents), await $.clock.now(), await read($, requestAtom))) {
+    stopTicker()
+  }
 }
 
 /** 何かが動き出したときに呼ぶ。マップを見ていなければ、次の1回で止まる */
@@ -145,6 +151,21 @@ export const register: Register = (on, options) => {
 
     return next(e)
   })
+
+  // 新しい依頼を受けたら、マップをその依頼のぶんに切り替え、開いていた詳細を閉じる
+  on('prompt.submit', async ($, e, next) => {
+    try {
+      // 出どころの無い入力(古いエンジンや、テストの $.prompt.submit)は、新しい依頼として扱う
+      if (isNewRequest((e.origin as { kind?: string } | undefined)?.kind ?? 'composer')) {
+        const at = await $.clock.now()
+        await update($, requestAtom, () => at)
+        await update($, selectedAtom, () => null)
+      }
+    } catch {
+      // 区切りが付けられなくても入力は止めない
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: COMMAND }, async $ => {
     await $.ui.open({ id: PANE, title: '作業ログ' })
@@ -247,7 +268,23 @@ export const register: Register = (on, options) => {
         await update($, agents, map => {
           const agent = map[agentId]
           if (typeof agent !== 'object' || agent === null) return map
-          return { ...map, [agentId]: { ...agent, status, durationMs: e.durationMs, endedAt } }
+          // トークンは、入力・出力・キャッシュの読み書きを合わせた数
+          const usage = e.usage
+          const tokens =
+            usage === undefined
+              ? undefined
+              : usage.input_tokens + usage.output_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+          return {
+            ...map,
+            [agentId]: {
+              ...agent,
+              status,
+              durationMs: e.durationMs,
+              endedAt,
+              ...(tokens === undefined ? {} : { tokens }),
+              ...(e.answer === '' ? {} : { answer: oneLine(e.answer, 400) }),
+            },
+          }
         })
         animate($, configView)
       }
@@ -323,35 +360,98 @@ export const register: Register = (on, options) => {
 
     if (view === 'map') {
       const now = await $.clock.now()
-      // ターミナルでは、メインのカードの左に Claude のキャラ(Raster)を置く。Raster の無い面では文字だけのマップにする
+      const since = await read($, requestAtom)
+      const selected = await read($, selectedAtom)
+      const chosen = selected === null ? undefined : known[selected]
+      const open = (id: string) => async () => {
+        await update($, selectedAtom, () => id)
+      }
+
+      // 箱を押したら、そのサブエージェントが何をしたかを出す
+      if (selected !== null && typeof chosen === 'object' && chosen !== null) {
+        const done = chosen.status !== undefined && chosen.status !== 'running'
+        // そのエージェントのツールの呼び出しと、終えた行(起動したサブエージェントの行も含む)
+        const work = list.filter(one => one.agentId === selected && one.kind !== 'summary' && one.kind !== 'notice')
+        const facts = [
+          chosen.model === '' ? 'モデル不明' : shortModel(chosen.model),
+          done
+            ? `${chosen.status === 'ok' ? '✓' : '✗'}${chosen.durationMs === undefined ? '' : ` ${seconds(chosen.durationMs)}`}`
+            : '実行中',
+          ...(chosen.tokens === undefined ? [] : [`${formatTokens(chosen.tokens)} トークン`]),
+        ]
+        return (
+          <Box flexDirection="column" width={width}>
+            <Box flexDirection="row" gap={1}>
+              <Button key="close-detail" hotkey="b" onPress={() => void update($, selectedAtom, () => null)}>
+                マップに戻る
+              </Button>
+            </Box>
+            <Text wrap="truncate">
+              <Text dimColor>#{chosen.no} </Text>
+              <Text bold color={TYPE_COLORS[hueOf(chosen.type) % TYPE_COLORS.length]}>
+                {chosen.type}
+              </Text>
+              <Text dimColor> · {facts.join(' · ')}</Text>
+            </Text>
+            <Text wrap="wrap">
+              <Text dimColor>頼まれたこと: </Text>
+              {chosen.name}
+            </Text>
+            <Text dimColor>したこと({work.length} 件)</Text>
+            {work.slice(-Math.max(1, room - 6)).map(one => (
+              <Text key={one.id} wrap="truncate">
+                <Text dimColor>{formatTime(one.at)} </Text>
+                <Text color={MARK_COLOR[one.status ?? 'running']}>{MARK[one.status ?? 'running']}</Text> {one.text}
+              </Text>
+            ))}
+            {chosen.answer === undefined ? null : (
+              <Text wrap="wrap">
+                <Text dimColor>結果: </Text>
+                {chosen.answer}
+              </Text>
+            )}
+          </Box>
+        )
+      }
+
+      // ターミナルでは、メインのカードの中の左に Claude のキャラ(Raster)を置く。Raster の無い面では文字だけのマップにする
       if (e.surface === 'terminal') {
         const { Raster } = $.ui.resolve(e)
-        const lines = layoutMap(list, known, mainModel, now, room, width, CLAWD_COLUMNS + 1)
-        const hub = lines.filter(line => line.key.startsWith('hub:'))
+        const lines = layoutMap(list, known, mainModel, now, room, width, { avatar: CLAWD_COLUMNS, since })
+        const inside = lines.filter(line => line.key.startsWith('hub:in:'))
+        const firstInside = lines.findIndex(line => line.key.startsWith('hub:in:'))
+        const before = lines.slice(0, firstInside)
+        const after = lines.slice(firstInside + inside.length)
         return (
           <Box flexDirection="column" width={width}>
             {header}
-            <Box flexDirection="row" gap={1}>
-              <Raster key="clawd" {...clawdFrame(mainMood(list, known, now), now)} />
+            {before.map(line => (
+              <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={line} />
+            ))}
+            <Box flexDirection="row">
               <Box flexDirection="column">
-                {hub.map(line => (
-                  <MapRow key={line.key} Text={Text} line={line} />
+                {inside.map(line => (
+                  <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={{ key: line.key, segs: line.left ?? [] }} />
+                ))}
+              </Box>
+              <Raster key="clawd" {...clawdFrame(mainMood(list, known, now, since), now)} />
+              <Box flexDirection="column">
+                {inside.map(line => (
+                  <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={{ key: line.key, segs: line.right ?? [] }} />
                 ))}
               </Box>
             </Box>
-            {lines
-              .filter(line => !line.key.startsWith('hub:'))
-              .map(line => (
-                <MapRow key={line.key} Text={Text} line={line} />
-              ))}
+            {after.map(line => (
+              <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={line} />
+            ))}
           </Box>
         )
       }
       return (
         <Box flexDirection="column" width={width}>
           {header}
-          {layoutMap(list, known, mainModel, now, room, width).map(line => (
-            <MapRow key={line.key} Text={Text} line={line} />
+          {layoutMap(list, known, mainModel, now, room, width, { since }).map(line => (
+            <MapRow key={line.key} Box={Box} Text={Text} Button={Button} open={open} line={line} />
           ))}
         </Box>
       )
@@ -499,22 +599,64 @@ const MAP_STYLE: Record<MapTone, MapStyle> = {
 /** エージェントの種類の色。種類ごとに hueOf で決まった番号の色を使う */
 const TYPE_COLORS: readonly string[] = ['permission', 'suggestion', 'remember', 'merged', 'autoAccept', 'planMode']
 
-/** マップの1行 */
-const MapRow = ({ Text, line }: { Text: TextElement; line: MapLine }) => (
-  <Text wrap="truncate">
-    {/* 空の行も1行の高さを取るよう、空白を置く */}
-    {line.segs.length === 0 ? ' ' : null}
-    {line.segs.map((seg, i) => (
-      <Text
-        key={String(i)}
-        {...MAP_STYLE[seg.tone]}
-        {...(seg.hue === undefined ? {} : { color: TYPE_COLORS[seg.hue % TYPE_COLORS.length] })}
-      >
-        {seg.text}
+type ButtonElement = ReturnType<EngineInterface['ui']['resolve']>['Button']
+type BoxElement = ReturnType<EngineInterface['ui']['resolve']>['Box']
+
+/** マップの1行。press の付いた区切りは、押すとそのエージェントの詳細を開くボタンにする */
+const MapRow = ({
+  Box,
+  Text,
+  Button,
+  open,
+  line,
+}: {
+  Box: BoxElement
+  Text: TextElement
+  Button: ButtonElement
+  open: (id: string) => () => Promise<void>
+  line: MapLine
+}) => {
+  const styled = (seg: MapSeg, i: number) => (
+    <Text
+      key={String(i)}
+      {...MAP_STYLE[seg.tone]}
+      {...(seg.hue === undefined ? {} : { color: TYPE_COLORS[seg.hue % TYPE_COLORS.length] })}
+    >
+      {seg.text}
+    </Text>
+  )
+  if (!line.segs.some(seg => seg.press !== undefined)) {
+    return (
+      <Text wrap="truncate">
+        {/* 空の行も1行の高さを取るよう、空白を置く */}
+        {line.segs.length === 0 ? ' ' : null}
+        {line.segs.map(styled)}
       </Text>
-    ))}
-  </Text>
-)
+    )
+  }
+  // 押せる区切りの続きを1つのボタンにまとめ、ほかは Text のまま横に並べる
+  const runs: Array<{ press?: string; segs: MapSeg[] }> = []
+  for (const seg of line.segs) {
+    const last = runs.at(-1)
+    if (last !== undefined && last.press === seg.press) last.segs.push(seg)
+    else runs.push({ press: seg.press, segs: [seg] })
+  }
+  return (
+    <Box flexDirection="row">
+      {runs.map((run, i) =>
+        run.press === undefined ? (
+          <Text key={`t${i}`} wrap="truncate">
+            {run.segs.map(styled)}
+          </Text>
+        ) : (
+          <Button key={`open:${run.press}`} plain onPress={open(run.press)}>
+            {run.segs.map(seg => seg.text).join('')}
+          </Button>
+        ),
+      )}
+    </Box>
+  )
+}
 
 const pad = (n: number): string => String(n).padStart(2, '0')
 

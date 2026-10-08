@@ -2,7 +2,7 @@ import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { WorkLogEntry } from '../types'
-import { describeTool, describeTurnEnd, resolveSummaryModel, shortModel } from './describe'
+import { describeTool, describeTurnEnd, isNewRequest, resolveSummaryModel, shortModel } from './describe'
 import { TICK_MS } from './map'
 
 const CWD = '/work/app'
@@ -436,16 +436,17 @@ test('ペインのボタンで一覧・ツリー・マップを順に回す', as
     expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
     // ターミナルでは、メインのカードの左に Claude のキャラ(Raster)を置き、カードの ◉ は外す
     if (surface === 'terminal') {
+      // ターミナルでは、メインのカードの中に Claude のキャラ(Raster)を置き、カードの ◉ は外す
       expect((await ui.find({ type: 'Raster' }))?.props).toEqual(expect.objectContaining({ columns: 9, rows: 4 }))
       expect(await ui.find({ text: /^╭─ メイン ─+ opus-5-5 ─╮$/ })).toBeDefined()
     } else {
       expect(await ui.find({ type: 'Raster' })).toBeUndefined()
       expect(await ui.find({ text: /╭─ ◉ メイン ─+ opus-5-5 ─╮/ })).toBeDefined()
     }
-    // 子は組織図の箱。#1 は終えて ✓、#2 は実行中
-    expect(await ui.find({ text: /│ #1 Explore·haiku +│ │ #2 Explore·haiku +│/ })).toBeDefined()
-    expect(await ui.find({ text: /│ ✓ 回答した +│ │ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 考えています +│/ })).toBeDefined()
-    expect(await ui.find({ text: /╰─+ 12秒 ─╯/ })).toBeDefined()
+    // 子は組織図の箱。番号と種類は押せるボタンで、#1 は終えて ✓ と所要時間、#2 は実行中
+    expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#2 Explore' })).toBeDefined()
+    expect(await ui.find({ text: /│ ✓ 12秒 +│ │ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 0秒 +│/ })).toBeDefined()
 
     await ui.press({ key: 'toggle-view' })
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
@@ -497,7 +498,8 @@ test('マップでは、組織図のようにサブエージェント2つの箱�
     expect(await ui.find({ text: surface === 'terminal' ? /^╭─ メイン/ : /^╭─ ◉ メイン/ })).toBeDefined()
     // サブエージェントはドット絵にせず、文字の枝で描く。Raster はメインのキャラの1つだけ
     expect(await ui.findAll({ type: 'Raster' })).toHaveLength(surface === 'terminal' ? 1 : 0)
-    expect(await ui.find({ text: /│ #1 Explore·haiku +│ │ #2 Explore·haiku +│/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#2 Explore' })).toBeDefined()
     // 起動したての依頼の粒が、まだ道筋の上にいる
     expect(await ui.find({ text: /●/ })).toBeDefined()
     expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
@@ -533,5 +535,70 @@ test('マップは動いているあいだだけ描き直し、何も動いて�
   await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
   await clock.advance(1000)
   expect(redraws.count).toBe(listed)
+  await ui.unmount()
+})
+
+test('依頼の区切りにするのは、通知やエージェントどうしのメッセージでない入力', () => {
+  expect(['composer', 'bridge', 'sdk', 'plugin', 'scheduled-trigger'].map(isNewRequest)).toEqual([true, true, true, true, true])
+  expect(['task-notification', 'peer', 'peer-send-message'].map(isNewRequest)).toEqual([false, false, false])
+})
+
+test('マップの箱を押すと、そのサブエージェントのモデル・時間・トークン・作業・結果を出し、戻れる', { options: { view: 'map' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'agent-1' }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  await start($)
+
+  await spawnExplore($)
+  await $.turn.complete({
+    answer: 'a.ts にテストは3つあります',
+    durationMs: 8_000,
+    isAborted: false,
+    turnId: 'sub-1',
+    reason: 'answer',
+    agentId: 'agent-1',
+    usage: { model: 'claude-haiku-5-5', input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 3000, cache_creation_input_tokens: 0 },
+  })
+  const agent = (state.agents as Record<string, { tokens?: number; answer?: string }>)['agent-1']
+  expect([agent?.tokens, agent?.answer]).toEqual([4200, 'a.ts にテストは3つあります'])
+
+  const ui = await mountPane($, 'terminal')
+  expect(await ui.find({ text: /4\.2k tok/ })).toBeDefined()
+  await ui.press({ key: 'open:agent-1' })
+  expect(state.selected).toBe('agent-1')
+  expect(await ui.find({ text: /^#1 Explore · haiku-5-5 · ✓ 8秒 · 4\.2k トークン$/ })).toBeDefined()
+  expect(await ui.find({ text: /^頼まれたこと: テストを調べる$/ })).toBeDefined()
+  // したことの一覧(テストの $.tool.call では agentId を渡せないので、終えた行で確かめる)と、結果
+  expect(await ui.find({ text: /^したこと\(1 件\)$/ })).toBeDefined()
+  expect(await ui.find({ text: /✓ 作業を終えた\(回答した\(8秒\)\)$/ })).toBeDefined()
+  expect(await ui.find({ text: /^結果: a\.ts にテストは3つあります$/ })).toBeDefined()
+
+  await ui.press({ key: 'close-detail' })
+  expect(state.selected).toBe(null)
+  expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('新しい依頼を受けると、マップはその依頼のぶんに切り替わり、開いていた詳細を閉じる', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  await spawnExplore($)
+  await subTurn($, 'agent-1', 1000)
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'open:agent-1' })
+  expect(state.selected).toBe('agent-1')
+
+  // 完了の通知(ここでは出どころを変えられないので、関数で確かめている)ではなく、新しい依頼が来た
+  await clock.advance(1000)
+  await $.prompt.submit({ text: '次はこれをして' })
+  expect(typeof state.requestAt).toBe('number')
+  expect(state.selected).toBe(null)
+  expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeUndefined()
+  expect(await ui.find({ text: /サブエージェントはいません/ })).toBeDefined()
   await ui.unmount()
 })

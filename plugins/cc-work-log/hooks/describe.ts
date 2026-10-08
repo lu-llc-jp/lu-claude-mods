@@ -147,3 +147,9 @@ export const summaryPrompt = (list: readonly WorkLogEntry[], agents: Record<stri
       return `- ${who}${one.text}${mark}`
     })
     .join('\n')
+
+/** 依頼の区切りにしない入力の出どころ。サブエージェントの完了の通知や、エージェントどうしのメッセージは、同じ依頼の続き */
+const NOT_A_REQUEST: ReadonlySet<string> = new Set(['task-notification', 'peer', 'peer-send-message'])
+
+/** 入力の出どころ(prompt.submit の origin.kind)が、メインへの新しい依頼か */
+export const isNewRequest = (kind: string): boolean => !NOT_A_REQUEST.has(kind)
