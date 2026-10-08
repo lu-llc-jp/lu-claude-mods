@@ -1,7 +1,7 @@
 /** ログ1行の種類。tool: ツールの呼び出し、agent: サブエージェントの起動、turn: ターンの終了、summary: 要約、notice: mod からのお知らせ */
 export type WorkLogKind = 'tool' | 'agent' | 'turn' | 'summary' | 'notice'
 
-/** running: 実行中、ok: 成功、error: 失敗。tool と agent の行だけが持つ */
+/** running: 実行中、ok: 成功、error: 失敗。tool と agent の行と、0.3 からはターン終了の行(回答した・それ以外)が持つ */
 export type WorkLogStatus = 'running' | 'ok' | 'error'
 
 export type WorkLogEntry = {
@@ -27,7 +27,18 @@ export type WorkLogAgent = {
   type: string
   /** 動いているモデル。分からなければ '' */
   model: string
+  /** 起動したエージェントの id。メインから起動したなら無い */
+  parentId?: string
+  /** 起動を記録した行の id。ツリーでは、この行の位置に枝を出す */
+  spawnEntryId?: string
+  /** running: 実行中、ok: 回答して終えた、error: 中断・エラーで終えた。0.2 以前に覚えたものには無い */
+  status?: WorkLogStatus
+  /** 終えたときの所要時間(ms) */
+  durationMs?: number
 }
+
+/** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー */
+export type WorkLogView = 'list' | 'tree'
 
 /** 要約を止めたときの記録。同じモデルのあいだは要約しない */
 export type WorkLogSummaryStop = { model: string; reason: string }
@@ -41,6 +52,8 @@ declare module 'claude-code' {
       /** セッションの作業ディレクトリ。パスを短く出すのに使う */
       cwd: string
       summaryStop: WorkLogSummaryStop | null
+      /** ペインのボタンで選んだ見せ方。null なら /config の view に従う */
+      view: WorkLogView | null
     }
   }
 }

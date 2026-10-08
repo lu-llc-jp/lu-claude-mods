@@ -94,7 +94,8 @@ export const describeTool = (tool: string, args: Record<string, unknown>, cwd: s
   }
 }
 
-const seconds = (ms: number): string => {
+/** ms → 「12秒」「1分15秒」 */
+export const seconds = (ms: number): string => {
   const s = Math.round(ms / 1000)
   return s < 60 ? `${s}秒` : `${Math.floor(s / 60)}分${s % 60}秒`
 }

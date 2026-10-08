@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { WorkLogAgent, WorkLogEntry, WorkLogSummaryStop } from '../types'
+import type { WorkLogAgent, WorkLogEntry, WorkLogStatus, WorkLogSummaryStop, WorkLogView } from '../types'
 import {
   HIDDEN_TOOLS,
   SUMMARY_SYSTEM,
@@ -16,6 +16,7 @@ import {
   shortModel,
   summaryPrompt,
 } from './describe'
+import { layoutTree, type TreeLine } from './tree'
 
 const PANE = 'cc-work-log'
 const COMMAND = 'cc-work-log'
@@ -28,6 +29,7 @@ const summaryStop = atom(
   { plugin: 'cc-work-log', key: 'summaryStop' } as const,
   null as WorkLogSummaryStop | null,
 )
+const viewAtom = atom({ plugin: 'cc-work-log', key: 'view' } as const, null as WorkLogView | null)
 
 const push = async ($: EngineInterface, entry: Omit<WorkLogEntry, 'at'>): Promise<void> => {
   const at = await $.clock.now()
@@ -98,6 +100,7 @@ export const register: Register = (on, options) => {
     String(options.summaryModel ?? 'off'),
     String(options.summaryModelCustom ?? ''),
   )
+  const configView: WorkLogView = options.view === 'tree' ? 'tree' : 'list'
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -149,17 +152,20 @@ export const register: Register = (on, options) => {
       if (result.deny === undefined && result.agentId !== undefined) {
         const agentId = result.agentId
         const known = await read($, agents)
+        const list = await read($, entries)
+        // Agent ツールの呼び出しはすでに「…を起動」の行がある。種類とモデルはここで分かるので、その行を書き換える。
+        // ワークフローなどツールを介さない起動だけ行を足す
+        const hasToolLine = e.workflow === undefined && list.some(one => one.id === e.tool_use_id)
         const agent: WorkLogAgent = {
           no: Object.keys(known).length + 1,
           name: oneLine(e.description !== '' ? e.description : e.subagentType, 30),
           type: e.subagentType,
           model: result.model,
+          parentId: e.parentAgentId,
+          spawnEntryId: hasToolLine ? e.tool_use_id : `spawn:${agentId}`,
+          status: 'running',
         }
         await update($, agents, map => ({ ...map, [agentId]: agent }))
-        const list = await read($, entries)
-        // Agent ツールの呼び出しはすでに「…を起動」の行がある。種類とモデルはここで分かるので、その行を書き換える。
-        // ワークフローなどツールを介さない起動だけ行を足す
-        const hasToolLine = e.workflow === undefined && list.some(one => one.id === e.tool_use_id)
         if (hasToolLine) {
           const text = describeSpawn(agent)
           await update($, entries, all => all.map(one => (one.id === e.tool_use_id ? { ...one, text } : one)))
@@ -187,8 +193,18 @@ export const register: Register = (on, options) => {
         id: `turn:${e.turnId}:${e.agentId ?? 'main'}`,
         kind: 'turn',
         text: e.agentId === undefined ? end : `作業を終えた(${end})`,
+        status: e.reason === 'answer' ? 'ok' : 'error',
         agentId: e.agentId,
       })
+      if (e.agentId !== undefined) {
+        const agentId = e.agentId
+        const status: WorkLogStatus = e.reason === 'answer' ? 'ok' : 'error'
+        await update($, agents, map => {
+          const agent = map[agentId]
+          if (typeof agent !== 'object' || agent === null) return map
+          return { ...map, [agentId]: { ...agent, status, durationMs: e.durationMs } }
+        })
+      }
       if (e.agentId === undefined && summaryModel !== undefined) {
         // ターンの終わりを待たせないよう、要約は後ろで行う。いま足したターン終了の行より前が、このターンの作業
         const model = summaryModel
@@ -208,21 +224,33 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, entries)
     const known = await read($, agents)
+    const view = (await read($, viewAtom)) ?? configView
     // メインのモデルは /model で変わるので、描くたびに聞く
     const mainModel = await $.session.model().catch(() => '')
     const width = Math.max(10, e.props.bodyColumns)
-    // 最新の行が見えるよう、入るぶんだけ後ろから出す
-    const room = Math.max(1, e.props.scroll.bodyRows)
+    // 見出しの1行を除いた行数。最新の行が見えるよう、入るぶんだけ後ろから出す
+    const room = Math.max(1, e.props.scroll.bodyRows - 1)
 
-    const header =
-      mainModel === '' ? null : (
-        <Text dimColor wrap="truncate">
-          メイン: {shortModel(mainModel)}
-        </Text>
-      )
+    const header = (
+      <Box flexDirection="row" gap={1}>
+        <Button
+          key="toggle-view"
+          hotkey="v"
+          dimColor
+          onPress={() => void update($, viewAtom, () => (view === 'tree' ? 'list' : 'tree'))}
+        >
+          {view === 'tree' ? '一覧で見る' : 'ツリーで見る'}
+        </Button>
+        {view === 'list' && mainModel !== '' ? (
+          <Text dimColor wrap="truncate">
+            メイン: {shortModel(mainModel)}
+          </Text>
+        ) : null}
+      </Box>
+    )
 
     if (list.length === 0) {
       return (
@@ -233,10 +261,21 @@ export const register: Register = (on, options) => {
       )
     }
 
+    if (view === 'tree') {
+      return (
+        <Box flexDirection="column" width={width}>
+          {header}
+          {layoutTree(list, known, mainModel, room).map(line => (
+            <TreeRow key={line.key} Text={Text} line={line} />
+          ))}
+        </Box>
+      )
+    }
+
     return (
       <Box flexDirection="column" width={width}>
         {header}
-        {list.slice(header === null ? -room : -Math.max(1, room - 1)).map(one => {
+        {list.slice(-room).map(one => {
           const time = formatTime(one.at)
           const agent = one.agentId === undefined ? undefined : known[one.agentId]
           // 古い版で覚えた名前(文字列)が残っていても描けるようにする
@@ -278,6 +317,70 @@ export const register: Register = (on, options) => {
       </Box>
     )
   })
+}
+
+const MARK = { running: '…', ok: '✓', error: '✗' } as const
+const MARK_COLOR = { running: undefined, ok: 'success', error: 'error' } as const
+
+type TextElement = ReturnType<EngineInterface['ui']['resolve']>['Text']
+
+/** ツリーの1行。罫線は薄く、状態の印は色で、サブエージェントの枝は名前の色で出す */
+const TreeRow = ({ Text, line }: { Text: TextElement; line: TreeLine }) => {
+  const mark = line.status === undefined ? null : <Text color={MARK_COLOR[line.status]}>{MARK[line.status]}</Text>
+  const note = line.note === undefined ? null : <Text dimColor> {line.note}</Text>
+  switch (line.tone) {
+    case 'root':
+      return (
+        <Text wrap="truncate">
+          {/* 根はターンの数だけ並ぶので、終えたターンには時刻を添えて見分ける */}
+          {line.at === undefined ? null : <Text dimColor>{formatTime(line.at)} </Text>}
+          <Text bold>{line.text}</Text> {mark}
+          {note}
+        </Text>
+      )
+    case 'agent':
+      return (
+        <Text wrap="truncate">
+          <Text dimColor>{line.guide}</Text>
+          <Text color="permission">{line.text}</Text> {mark}
+          {note}
+        </Text>
+      )
+    case 'turn':
+      return (
+        <Text dimColor wrap="truncate">
+          {line.at === undefined ? '' : `${formatTime(line.at)} `}
+          {mark}
+          {mark === null ? '' : ' '}
+          {line.text}
+        </Text>
+      )
+    case 'summary':
+      return (
+        <Text color="suggestion" wrap="truncate">
+          {line.guide}要約: {line.text}
+        </Text>
+      )
+    case 'notice':
+      return (
+        <Text color="warning" wrap="truncate">
+          {line.guide}
+          {line.text}
+        </Text>
+      )
+    case 'more':
+      return <Text dimColor>{line.text}</Text>
+    default:
+      return (
+        <Text wrap="truncate">
+          <Text dimColor>{line.guide}</Text>
+          {mark}
+          {mark === null ? '' : ' '}
+          {line.text}
+          {note}
+        </Text>
+      )
+  }
 }
 
 const pad = (n: number): string => String(n).padStart(2, '0')
