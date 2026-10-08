@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { WorkLogAgent, WorkLogEntry, WorkLogStatus, WorkLogSummaryStop, WorkLogView } from '../types'
 import {
@@ -16,6 +16,7 @@ import {
   shortModel,
   summaryPrompt,
 } from './describe'
+import { TICK_MS, isMapAnimating, layoutMap, type MapLine, type MapTone } from './map'
 import { layoutTree, type TreeLine } from './tree'
 
 const PANE = 'cc-work-log'
@@ -40,7 +41,39 @@ const setStatus = async ($: EngineInterface, id: string, status: WorkLogEntry['s
   await update($, entries, list => list.map(one => (one.id === id ? { ...one, status } : one)))
 }
 
+/** ボタンで回す見せ方の順と、そのボタンの文言(押すと次の見せ方になる) */
+const NEXT_VIEW: Record<WorkLogView, WorkLogView> = { list: 'tree', tree: 'map', map: 'list' }
+const VIEW_BUTTON: Record<WorkLogView, string> = { list: 'ツリーで見る', tree: 'マップで見る', map: '一覧で見る' }
+
+const isView = (value: unknown): value is WorkLogView => value === 'list' || value === 'tree' || value === 'map'
+
 const errorText = (err: unknown): string => oneLine(err instanceof Error ? err.message : String(err), 120)
+
+// マップの描き直しのタイマー。動いているものがあるあいだだけ回す。ホットリロードではエンジンが止める
+let ticker: Timer | undefined
+
+const stopTicker = (): void => {
+  ticker?.cancel()
+  ticker = undefined
+}
+
+const tick = async ($: EngineInterface, configView: WorkLogView): Promise<void> => {
+  const view = (await read($, viewAtom)) ?? configView
+  const shown = view === 'map' && (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
+  if (!shown) {
+    stopTicker()
+    return
+  }
+  // 止めるときも1回描き直し、最後の様子(粒が届いた・点が ✓ になった)を残す
+  $.ui.invalidate('ui.render')
+  if (!isMapAnimating(await read($, entries), await read($, agents), await $.clock.now())) stopTicker()
+}
+
+/** 何かが動き出したときに呼ぶ。マップを見ていなければ、次の1回で止まる */
+const animate = ($: EngineInterface, configView: WorkLogView): void => {
+  if (ticker !== undefined) return
+  ticker = $.clock.every(TICK_MS, () => void tick($, configView).catch(stopTicker))
+}
 
 /** このターンの作業をモデルで要約し、ペインに1行足す。失敗しても作業ログは止めない */
 const summarize = async (
@@ -100,7 +133,7 @@ export const register: Register = (on, options) => {
     String(options.summaryModel ?? 'off'),
     String(options.summaryModelCustom ?? ''),
   )
-  const configView: WorkLogView = options.view === 'tree' ? 'tree' : 'list'
+  const configView: WorkLogView = isView(options.view) ? options.view : 'list'
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -114,6 +147,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: COMMAND }, async $ => {
     await $.ui.open({ id: PANE, title: '作業ログ' })
+    animate($, configView)
 
     return { text: '作業ログのペインを開きました' }
   }).catch(() => ({ text: '作業ログのペインを開けませんでした' }))
@@ -132,6 +166,7 @@ export const register: Register = (on, options) => {
         status: 'running',
         agentId: e.agentId,
       })
+      animate($, configView)
     } catch {
       // ログが書けなくてもツールは止めない
     }
@@ -139,6 +174,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     try {
       await setStatus($, id, result.deny !== undefined || result.isError === true ? 'error' : 'ok')
+      animate($, configView)
     } catch {
       // 同上
     }
@@ -164,6 +200,7 @@ export const register: Register = (on, options) => {
           parentId: e.parentAgentId,
           spawnEntryId: hasToolLine ? e.tool_use_id : `spawn:${agentId}`,
           status: 'running',
+          startedAt: await $.clock.now(),
         }
         await update($, agents, map => ({ ...map, [agentId]: agent }))
         if (hasToolLine) {
@@ -178,6 +215,7 @@ export const register: Register = (on, options) => {
             agentId: e.parentAgentId,
           })
         }
+        animate($, configView)
       }
     } catch {
       // ログが書けなくても起動は止めない
@@ -199,11 +237,13 @@ export const register: Register = (on, options) => {
       if (e.agentId !== undefined) {
         const agentId = e.agentId
         const status: WorkLogStatus = e.reason === 'answer' ? 'ok' : 'error'
+        const endedAt = await $.clock.now()
         await update($, agents, map => {
           const agent = map[agentId]
           if (typeof agent !== 'object' || agent === null) return map
-          return { ...map, [agentId]: { ...agent, status, durationMs: e.durationMs } }
+          return { ...map, [agentId]: { ...agent, status, durationMs: e.durationMs, endedAt } }
         })
+        animate($, configView)
       }
       if (e.agentId === undefined && summaryModel !== undefined) {
         // ターンの終わりを待たせないよう、要約は後ろで行う。いま足したターン終了の行より前が、このターンの作業
@@ -240,9 +280,12 @@ export const register: Register = (on, options) => {
           key="toggle-view"
           hotkey="v"
           dimColor
-          onPress={() => void update($, viewAtom, () => (view === 'tree' ? 'list' : 'tree'))}
+          onPress={async () => {
+            await update($, viewAtom, () => NEXT_VIEW[view])
+            animate($, configView)
+          }}
         >
-          {view === 'tree' ? '一覧で見る' : 'ツリーで見る'}
+          {VIEW_BUTTON[view]}
         </Button>
         {view === 'list' && mainModel !== '' ? (
           <Text dimColor wrap="truncate">
@@ -267,6 +310,18 @@ export const register: Register = (on, options) => {
           {header}
           {layoutTree(list, known, mainModel, room).map(line => (
             <TreeRow key={line.key} Text={Text} line={line} />
+          ))}
+        </Box>
+      )
+    }
+
+    if (view === 'map') {
+      const now = await $.clock.now()
+      return (
+        <Box flexDirection="column" width={width}>
+          {header}
+          {layoutMap(list, known, mainModel, now, room).map(line => (
+            <MapRow key={line.key} Text={Text} line={line} />
           ))}
         </Box>
       )
@@ -382,6 +437,32 @@ const TreeRow = ({ Text, line }: { Text: TextElement; line: TreeLine }) => {
       )
   }
 }
+
+/** マップの色分け。枝は薄く、粒と光っている中心は目立たせる */
+const MAP_STYLE: Record<MapTone, { color?: string; dimColor?: boolean; bold?: boolean }> = {
+  edge: { dimColor: true },
+  flow: { color: 'suggestion', bold: true },
+  hub: { color: 'claude', bold: true },
+  hubIdle: { dimColor: true },
+  node: { color: 'permission', bold: true },
+  ok: { color: 'success' },
+  error: { color: 'error' },
+  label: {},
+  tool: { dimColor: true },
+  note: { dimColor: true },
+  more: { dimColor: true },
+}
+
+/** マップの1行 */
+const MapRow = ({ Text, line }: { Text: TextElement; line: MapLine }) => (
+  <Text wrap="truncate">
+    {line.segs.map((seg, i) => (
+      <Text key={String(i)} {...MAP_STYLE[seg.tone]}>
+        {seg.text}
+      </Text>
+    ))}
+  </Text>
+)
 
 const pad = (n: number): string => String(n).padStart(2, '0')
 

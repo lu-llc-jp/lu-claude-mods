@@ -368,8 +368,8 @@ test('custom で空なら要約しない理由を出す', () => {
 const subTurn = ($: Engine, agentId: string, durationMs: number) =>
   $.turn.complete({ answer: '', durationMs, isAborted: false, turnId: `sub-${agentId}`, reason: 'answer', agentId })
 
-test('起動したサブエージェントの親・起動の行・状態を覚え、終えたら所要時間を足す', async ($, on) => {
-  answerBasics(on)
+test('起動したサブエージェントの親・起動の行・状態・時刻を覚え、終えたら所要時間を足す', async ($, on) => {
+  const clock = answerBasics(on)
   answerTools(on)
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
   await start($)
@@ -383,15 +383,17 @@ test('起動したサブエージェントの親・起動の行・状態を覚�
       model: 'haiku',
       spawnEntryId: 'spawn:agent-1',
       status: 'running',
+      startedAt: Date.parse('2026-10-08T05:00:00Z'),
     },
   })
 
+  await clock.advance(12_000)
   await subTurn($, 'agent-1', 12_000)
-  const agent = (state.agents as Record<string, { status: string; durationMs: number }>)['agent-1']
-  expect([agent?.status, agent?.durationMs]).toEqual(['ok', 12_000])
+  const agent = (state.agents as Record<string, { status: string; durationMs: number; endedAt: number }>)['agent-1']
+  expect([agent?.status, agent?.durationMs, agent?.endedAt]).toEqual(['ok', 12_000, clock.now()])
 })
 
-test('ペインのボタンで一覧とツリーを行き来する', async ($, on) => {
+test('ペインのボタンで一覧・ツリー・マップを順に回す', async ($, on) => {
   answerBasics(on)
   answerTools(on)
   let n = 0
@@ -412,12 +414,20 @@ test('ペインのボタンで一覧とツリーを行き来する', async ($, o
     expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
 
     await ui.press({ key: 'toggle-view' })
+    expect(await ui.find({ text: /マップで見る/ })).toBeDefined()
     expect(await ui.find({ text: /メイン·opus-5-5 …/ })).toBeDefined()
     expect(await ui.find({ text: /├─ #1 Explore·haiku『テストを調べる』 ✓ 12秒/ })).toBeDefined()
     expect(await ui.find({ text: /└─ #2 Explore·haiku『テストを調べる』 …/ })).toBeDefined()
 
     await ui.press({ key: 'toggle-view' })
+    expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
+    expect(await ui.find({ text: /◉ メイン·opus-5-5/ })).toBeDefined()
+    expect(await ui.find({ text: /✓ #1 Explore·haiku『テストを調べる』 12秒/ })).toBeDefined()
+    expect(await ui.find({ text: /[●○] #2 Explore·haiku『テストを調べる』/ })).toBeDefined()
+
+    await ui.press({ key: 'toggle-view' })
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
+    expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -431,6 +441,72 @@ test('/config の view を tree にすると、ツリーで開く', { options: {
 
   const ui = await mountPane($, 'terminal')
   expect(await ui.find({ text: /└─ ✓ `a.ts` を読む/ })).toBeDefined()
-  expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
+  expect(await ui.find({ text: /マップで見る/ })).toBeDefined()
+  await ui.unmount()
+})
+
+/** マップを見ているペインが出ていることにし、描き直しの依頼を数える */
+const watchMap = (on: On) => {
+  on('ui.panes', () => ({
+    value: [{ id: 'cc-work-log', title: '作業ログ', isShown: true, isFocused: false, isPlaced: true }],
+  }))
+  const redraws = { count: 0 }
+  on('ui.invalidate', () => {
+    redraws.count += 1
+    return { value: undefined } as never
+  })
+  return redraws
+}
+
+test('マップでは、サブエージェント2つに2本の枝が伸び、依頼の粒が流れる', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  watchMap(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `agent-${(n += 1)}` }))
+  await start($)
+
+  await spawnExplore($, 'w1')
+  await spawnExplore($, 'w2')
+  await clock.advance(400)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /╭─*▸─*[●○] #1 Explore·haiku/ })).toBeDefined()
+    expect(await ui.find({ text: /^◉ メイン/ })).toBeDefined()
+    expect(await ui.find({ text: /╰─*▸─*[●○] #2 Explore·haiku/ })).toBeDefined()
+    expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('マップは動いているあいだだけ描き直し、何も動いていなければ止まる', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  const redraws = watchMap(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  // 実行中のサブエージェントがいるあいだは、1秒に5回描き直す
+  await spawnExplore($)
+  await clock.advance(1000)
+  expect(redraws.count).toBe(5)
+
+  // 終えると、結果の粒が戻りきったところで止まる
+  await subTurn($, 'agent-1', 1000)
+  await clock.advance(5000)
+  const settled = redraws.count
+  await clock.advance(5000)
+  expect(redraws.count).toBe(settled)
+  expect(settled).toBeLessThan(5 + 5 * 5)
+
+  // 一覧に切り替えていれば、動きがあっても描き直さない
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'toggle-view' })
+  expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
+  const listed = redraws.count
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+  await clock.advance(1000)
+  expect(redraws.count).toBe(listed)
   await ui.unmount()
 })

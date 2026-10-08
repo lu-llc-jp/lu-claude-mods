@@ -61,14 +61,14 @@ export const splitTurns = (list: readonly WorkLogEntry[]): Segment[] => {
   return segments
 }
 
-const agentOf = (agents: Record<string, WorkLogAgent>, id: string): WorkLogAgent | undefined => {
+export const agentOf = (agents: Record<string, WorkLogAgent>, id: string): WorkLogAgent | undefined => {
   const agent = agents[id]
   // 0.1 では名前(文字列)だけを覚えていた
   return typeof agent === 'object' && agent !== null ? agent : undefined
 }
 
 /** 枝の状態。0.2 以前に覚えたエージェントは状態を持たないので、そのターン終了の行があるかで決める */
-const agentStatus = (agent: WorkLogAgent | undefined, id: string, work: readonly WorkLogEntry[]): WorkLogStatus => {
+export const agentStatus = (agent: WorkLogAgent | undefined, id: string, work: readonly WorkLogEntry[]): WorkLogStatus => {
   if (agent?.status !== undefined) return agent.status
   return work.some(one => one.kind === 'turn' && one.agentId === id) ? 'ok' : 'running'
 }

@@ -35,10 +35,14 @@ export type WorkLogAgent = {
   status?: WorkLogStatus
   /** 終えたときの所要時間(ms) */
   durationMs?: number
+  /** 起動した時刻(ms)。マップで依頼の粒を流すのに使う。0.3 以前に覚えたものには無い */
+  startedAt?: number
+  /** 終えた時刻(ms)。マップで結果の粒を流すのに使う。0.3 以前に覚えたものには無い */
+  endedAt?: number
 }
 
-/** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー */
-export type WorkLogView = 'list' | 'tree'
+/** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー、map: メインを中心にしたマップのアニメーション */
+export type WorkLogView = 'list' | 'tree' | 'map'
 
 /** 要約を止めたときの記録。同じモデルのあいだは要約しない */
 export type WorkLogSummaryStop = { model: string; reason: string }
