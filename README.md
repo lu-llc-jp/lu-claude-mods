@@ -8,6 +8,7 @@ lu-llc が配布する [Claude Code](https://claude.com/claude-code) の mod(関
 | mod | 内容 |
 | --- | --- |
 | [cc-service-status](plugins/cc-service-status/) | Claude のサービス稼働状況(status.claude.com)をステータスラインとペインに出す |
+| [cc-work-log](plugins/cc-work-log/) | エージェントとサブエージェントの作業を日本語の短い文でペインに流す |
 
 ## インストール
 
@@ -16,6 +17,8 @@ lu-llc が配布する [Claude Code](https://claude.com/claude-code) の mod(関
 ```
 /plugin install cc-service-status --marketplace lu-llc-jp/lu-claude-mods
 ```
+
+他の mod も、`cc-service-status` の部分をその mod 名に変えて同じように入れます。
 
 マーケットプレイスの追加を聞かれたら `y`、続いてスコープ(通常はユーザー)を選びます。
 デスクトップアプリの Code タブではこのコマンドは使えません。ターミナルでユーザースコープに入れれば、そちらでも読み込まれます。
