@@ -93,18 +93,59 @@ test('サブエージェントが起動したサブエージェントは入れ�
   ])
 })
 
-test('前のターンは「回答した(12秒)」の1行に畳み、今のターンだけをツリーにする', () => {
-  const list = [
-    entry('old', '`old.ts` を読む'),
-    entry('turn:t1', '回答した(12秒)', { kind: 'turn' }),
-    entry('summary:t1', 'old.ts を読んだ。', { kind: 'summary', status: undefined }),
-    entry('new', '`new.ts` を編集', { status: 'running' }),
-  ]
-  const lines = layoutTree(list, {}, 'opus', 30)
+/** サブエージェント2つを使って回答したターンのあとに、通知だけのターンと作業中のターンが続く */
+const threeTurns = (): WorkLogEntry[] => [
+  ...twoAgents().filter(one => one.id !== 'b2'),
+  entry('turn:t1', '回答した(40秒)', { kind: 'turn' }),
+  entry('summary:t1', '2つのサブエージェントで調べた。', { kind: 'summary', status: undefined }),
+  entry('turn:t2', '回答した(3秒)', { kind: 'turn' }),
+  entry('new', '`new.ts` を編集', { status: 'running' }),
+]
+const finished = { 'agent-a': explore, 'agent-b': { ...plan, status: 'ok' as const, durationMs: 5_000 } }
 
-  expect(lines.map(line => line.tone)).toEqual(['turn', 'summary', 'root', 'work'])
-  expect(draw(lines).slice(1)).toEqual(['   old.ts を読んだ。', 'メイン·opus …', '└─ … `new.ts` を編集'])
-  expect(draw(lines).join('\n')).not.toContain('old.ts` を読む')
+test('回答を終えたターンも、ツリーのまま上に残す', () => {
+  const lines = layoutTree(threeTurns(), finished, 'opus', 30)
+
+  expect(draw(lines)).toEqual([
+    'メイン·opus ✓ (回答した(40秒))',
+    '├─ ✓ `a.ts` を読む',
+    '├─ #1 Explore·haiku-5-5『テストを調べる』 ✓ (12秒)',
+    '│  ├─ ✓ 「TODO」を検索',
+    '│  └─ ✓ `test/a.test.ts` を読む',
+    '└─ #2 Plan·sonnet-5-5『方針を立てる』 ✓ (5秒)',
+    '   └─ ✓ `b.ts` を読む',
+    '2つのサブエージェントで調べた。',
+    'メイン·opus ✓ (回答した(3秒))',
+    'メイン·opus …',
+    '└─ … `new.ts` を編集',
+  ])
+  // 根はターンごとに別の key を持ち、終えたターンの根には時刻がある
+  const roots = lines.filter(line => line.tone === 'root')
+  expect(new Set(roots.map(root => root.key)).size).toBe(3)
+  expect(roots.map(root => root.at !== undefined)).toEqual([true, true, false])
+})
+
+test('入りきらなければ、前のターンの枝の作業を畳み、次に古いターンから1行に畳む', () => {
+  expect(draw(layoutTree(threeTurns(), finished, 'opus', 8))).toEqual([
+    'メイン·opus ✓ (回答した(40秒))',
+    '├─ ✓ `a.ts` を読む',
+    '├─ #1 Explore·haiku-5-5『テストを調べる』 ✓ (12秒 · 作業 2 件を畳んだ)',
+    '└─ #2 Plan·sonnet-5-5『方針を立てる』 ✓ (5秒 · 作業 1 件を畳んだ)',
+    '2つのサブエージェントで調べた。',
+    'メイン·opus ✓ (回答した(3秒))',
+    'メイン·opus …',
+    '└─ … `new.ts` を編集',
+  ])
+
+  const lines = layoutTree(threeTurns(), finished, 'opus', 5)
+  // 2つ目のターンは作業が無く、畳んでも縮まないので根のまま
+  expect(lines.map(line => line.tone)).toEqual(['turn', 'summary', 'root', 'root', 'work'])
+  expect(draw(lines).slice(1)).toEqual([
+    '   2つのサブエージェントで調べた。',
+    'メイン·opus ✓ (回答した(3秒))',
+    'メイン·opus …',
+    '└─ … `new.ts` を編集',
+  ])
 })
 
 test('ターンの合間は、終えたばかりのターンを開いたまま出す', () => {

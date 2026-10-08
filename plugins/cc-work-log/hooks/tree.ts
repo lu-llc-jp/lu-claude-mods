@@ -3,7 +3,7 @@ import { agentLabel, seconds, shortModel } from './describe'
 
 /**
  * ツリー表示の1行。描く側はこれを色付きの Text にするだけにして、組み立てはここで行う(テストしやすくするため)。
- * tone: root はメイン、agent はサブエージェントの枝、work は作業、turn は畳んだ前のターン、
+ * tone: root はターンごとのメイン、agent はサブエージェントの枝、work は作業、turn は畳んだ前のターン、
  * summary・notice は要約とお知らせ、more は省いた行の目印
  */
 export type TreeLine = {
@@ -15,7 +15,7 @@ export type TreeLine = {
   status?: WorkLogStatus
   /** 文のあとに薄く足す(所要時間など) */
   note?: string
-  /** 前のターンの行だけ持つ。終えた時刻 */
+  /** 終えたターンの行(畳んだ行と根)だけ持つ。終えた時刻 */
   at?: number
 }
 
@@ -151,10 +151,45 @@ const foldOne = (nodes: Node[]): boolean => {
   return false
 }
 
+type Turn = { segment: Segment; nodes: Node[]; collapsed: boolean }
+
+const extraLine = (extra: WorkLogEntry, guide: string): TreeLine => ({
+  key: extra.id,
+  guide,
+  tone: extra.kind === 'summary' ? 'summary' : 'notice',
+  text: extra.text,
+})
+
+/** ターン1回ぶんの行。畳んだターンは「回答した(12秒)」の1行と、その要約・お知らせだけにする */
+const turnLines = (turn: Turn, index: number, mainModel: string): TreeLine[] => {
+  const { segment } = turn
+  const end = segment.end
+  if (turn.collapsed && end !== undefined) {
+    return [
+      { key: end.id, guide: '', tone: 'turn', text: end.text, status: end.status ?? 'ok', at: end.at },
+      ...segment.extras.map(extra => extraLine(extra, '   ')),
+    ]
+  }
+  const root: TreeLine = {
+    key: `root:${index}`,
+    guide: '',
+    tone: 'root',
+    text: `メイン${mainModel === '' ? '' : `·${shortModel(mainModel)}`}`,
+    status: end === undefined ? 'running' : (end.status ?? 'ok'),
+    note: end?.text,
+    at: end?.at,
+  }
+  return [root, ...flatten(turn.nodes, ''), ...segment.extras.map(extra => extraLine(extra, ''))]
+}
+
 /**
  * ツリー表示の行を組み立てる。
- * 対象は今のターン。ターンの合間(まだ次の作業が無い)は、終えたばかりのターンを出す。それより前のターンは1行に畳む。
- * rows に入りきらなければ、終えた枝の作業を古い順に畳み、それでも余れば前のターン、ツリーの上のほうの順に省く。
+ * ターンごとにメインを根にしたツリーを上から積む。回答を終えたターンも、入りきるかぎり開いたまま出す。
+ * rows に入りきらなければ、次の順に詰める。実行中の枝の作業は畳まない。
+ * 1. 前のターンの終えた枝の作業を、古いターンから畳む
+ * 2. 前のターンを、古いものから「回答した(12秒)」の1行に畳む
+ * 3. 最後のターンの終えた枝の作業を、古い順に畳む
+ * 4. 畳んだ前のターンを上から省き、それでも入らなければ最後のツリーの上のほうを省く
  */
 export const layoutTree = (
   list: readonly WorkLogEntry[],
@@ -162,43 +197,27 @@ export const layoutTree = (
   mainModel: string,
   rows: number,
 ): TreeLine[] => {
-  const segments = splitTurns(list)
-  const target = segments.at(-1)
-  if (target === undefined) return []
-
-  const history: TreeLine[] = segments.slice(0, -1).flatMap(segment => {
-    const end = segment.end
-    if (end === undefined) return []
-    return [
-      { key: end.id, guide: '', tone: 'turn' as const, text: end.text, status: end.status ?? 'ok', at: end.at },
-      ...segment.extras.map(extra => ({
-        key: extra.id,
-        guide: '   ',
-        tone: extra.kind === 'summary' ? ('summary' as const) : ('notice' as const),
-        text: extra.text,
-      })),
-    ]
-  })
-
-  const root: TreeLine = {
-    key: 'root',
-    guide: '',
-    tone: 'root',
-    text: `メイン${mainModel === '' ? '' : `·${shortModel(mainModel)}`}`,
-    status: target.end === undefined ? 'running' : (target.end.status ?? 'ok'),
-    note: target.end?.text,
-  }
-  const tail: TreeLine[] = target.extras.map(extra => ({
-    key: extra.id,
-    guide: '',
-    tone: extra.kind === 'summary' ? 'summary' : 'notice',
-    text: extra.text,
+  const turns: Turn[] = splitTurns(list).map(segment => ({
+    segment,
+    nodes: buildNodes(segment, agents),
+    collapsed: false,
   }))
+  const target = turns.at(-1)
+  if (target === undefined) return []
+  const older = turns.slice(0, -1)
 
-  const nodes = buildNodes(target, agents)
-  let body = flatten(nodes, '')
-  while (history.length + 1 + body.length + tail.length > rows && foldOne(nodes)) body = flatten(nodes, '')
+  const historyLines = (): TreeLine[] => older.flatMap((turn, i) => turnLines(turn, i, mainModel))
+  const targetLines = (): TreeLine[] => turnLines(target, older.length, mainModel)
+  const fits = (): boolean => historyLines().length + targetLines().length <= rows
 
+  for (const turn of older) while (!fits() && foldOne(turn.nodes));
+  for (const turn of older) if (!fits()) turn.collapsed = true
+  while (!fits() && foldOne(target.nodes));
+
+  const history = historyLines()
+  const [root, ...rest] = targetLines()
+  const tail = target.segment.extras.map(extra => extraLine(extra, ''))
+  const body = rest.slice(0, rest.length - tail.length)
   const fixed = 1 + tail.length
   if (history.length + fixed + body.length <= rows) return [...history, root, ...body, ...tail]
 

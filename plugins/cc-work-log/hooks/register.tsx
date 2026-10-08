@@ -332,6 +332,8 @@ const TreeRow = ({ Text, line }: { Text: TextElement; line: TreeLine }) => {
     case 'root':
       return (
         <Text wrap="truncate">
+          {/* 根はターンの数だけ並ぶので、終えたターンには時刻を添えて見分ける */}
+          {line.at === undefined ? null : <Text dimColor>{formatTime(line.at)} </Text>}
           <Text bold>{line.text}</Text> {mark}
           {note}
         </Text>

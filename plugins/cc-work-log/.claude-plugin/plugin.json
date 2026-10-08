@@ -1,6 +1,6 @@
 {
   "name": "cc-work-log",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "エージェントとサブエージェントの作業(読む・編集・実行など)を日本語の短い文でペインに流す",
   "author": {
     "name": "lu-llc"
