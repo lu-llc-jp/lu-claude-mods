@@ -9,6 +9,7 @@ lu-llc が配布する [Claude Code](https://claude.com/claude-code) の mod(関
 | --- | --- |
 | [cc-service-status](plugins/cc-service-status/) | Claude のサービス稼働状況(status.claude.com)をステータスラインとペインに出す |
 | [cc-work-log](plugins/cc-work-log/) | エージェントとサブエージェントの作業を日本語の短い文でペインに流す |
+| [cc-skill-map](plugins/cc-skill-map/) | 使えるスキルの一覧と、その手順の流れ(担い手・承認・サブエージェント・成果物)をペインに図で出す |
 
 ## インストール
 

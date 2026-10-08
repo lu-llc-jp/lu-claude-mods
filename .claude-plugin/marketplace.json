@@ -14,6 +14,11 @@
       "name": "cc-work-log",
       "source": "./plugins/cc-work-log",
       "description": "エージェントとサブエージェントの作業(読む・編集・実行など)を日本語の短い文でペインに流す"
+    },
+    {
+      "name": "cc-skill-map",
+      "source": "./plugins/cc-skill-map",
+      "description": "使えるスキルの一覧と、その手順の流れ(担い手・承認・サブエージェント・成果物)をペインに図で出す"
     }
   ]
 }
