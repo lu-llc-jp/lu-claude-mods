@@ -12,9 +12,9 @@ type Palette = { o: number; b: number; l: number; a: number; e: number }
 type Sprite = { art: readonly string[]; palette: Palette }
 
 const SPRITES: Record<SpriteKind, Sprite> = {
-  // メイン: アンテナにランプを載せた司令塔のロボ(8×8)
+  // メイン: アンテナにランプを載せた司令塔のロボ(8×6。サブエージェントと同じ3行に収める)
   main: {
-    art: mirror(['...a', '...o', 'oooo', 'obbb', 'obeb', 'obbl', 'oooo', '.oo.']),
+    art: mirror(['...a', 'oooo', 'obeb', 'obbl', 'oooo', '.oo.']),
     palette: { o: 0x5a2a1a, b: 0xe07a4f, l: 0xf6c39f, a: 0xffd54a, e: 0x1d1d1d },
   },
   // Explore: 見張りのフクロウ(6×6)
@@ -42,16 +42,12 @@ const SPRITES: Record<SpriteKind, Sprite> = {
 export const kindOf = (type: string): SpriteKind =>
   type === 'Explore' ? 'explore' : type === 'Plan' ? 'plan' : type === 'general-purpose' ? 'general' : 'other'
 
-export const spriteSize = (kind: SpriteKind): { width: number; height: number } => {
-  const art = SPRITES[kind].art
-  return { width: art[0]?.length ?? 0, height: art.length }
-}
-
 /** キャラの描き方。blink: 目を閉じる、accent: ランプなどの色を差し替える、fade: 色を落とす割合、tint: 色を寄せる先 */
 export type SpriteLook = { blink?: boolean; accent?: number; fade?: number; tint?: number }
 
 const GRAY = 0x6a6f78
-const RED = 0xd04848
+/** 結果の粒や、届いたときのランプの緑 */
+export const OK_GREEN = 0x5fd068
 
 /** (x, y) を左上にキャラを置く */
 export const drawSprite = (pixels: Pixels, kind: SpriteKind, x: number, y: number, look: SpriteLook = {}): void => {
@@ -71,18 +67,3 @@ export const drawSprite = (pixels: Pixels, kind: SpriteKind, x: number, y: numbe
     })
   })
 }
-
-/** 終えた印(4×3)。ok は緑のチェック、error は赤のばつ */
-const CHECK = ['...g', 'g.g.', '.g..']
-const CROSS = ['g.g.', '.g..', 'g.g.']
-export const OK_GREEN = 0x5fd068
-export const drawBadge = (pixels: Pixels, ok: boolean, x: number, y: number): void => {
-  const color = ok ? OK_GREEN : RED
-  ;(ok ? CHECK : CROSS).forEach((row, dy) => {
-    ;[...row].forEach((ch, dx) => {
-      if (ch === 'g') setPixel(pixels, x + dx, y + dy, color)
-    })
-  })
-}
-
-export const ERROR_RED = RED

@@ -18,7 +18,7 @@ export const blankPixels = (width: number, height: number): Pixels => ({
   data: new Array<number>(width * height).fill(CLEAR),
 })
 
-export const getPixel = (pixels: Pixels, x: number, y: number): number =>
+const getPixel = (pixels: Pixels, x: number, y: number): number =>
   x < 0 || y < 0 || x >= pixels.width || y >= pixels.height ? CLEAR : (pixels.data[y * pixels.width + x] ?? CLEAR)
 
 export const setPixel = (pixels: Pixels, x: number, y: number, color: number): void => {
