@@ -64,6 +64,9 @@ export type FlowState =
     }
   | { status: 'none'; reason: string }
 
+/** 流れの再生。どのスキルを、いつ始めたか(ms) */
+export type FlowPlay = { skill: string; startedAt: number }
+
 /** $.store に残す、モデルで抽出した流れ。本文のハッシュとモデルが同じあいだは使い回す */
 export type FlowCache = { hash: string; model: string; flow: SkillFlow }
 
@@ -78,6 +81,8 @@ declare module 'claude-code' {
       selected: string | null
       /** スキルの名前 → 流れの読み取りの様子 */
       flows: Record<string, FlowState>
+      /** 再生しているスキルと始めた時刻。再生していなければ null。最後まで再生しても、もう一度押すか一覧に戻るまで残す */
+      play: FlowPlay | null
       /** SKILL.md の無いスキル(組み込みなど)の、呼ばれたときに展開された本文。スキルの名前 → 本文 */
       prompts: Record<string, string>
     }

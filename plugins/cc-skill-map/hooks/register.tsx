@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { FlowActor, FlowCache, FlowState, SkillInfo } from '../types'
+import type { FlowActor, FlowCache, FlowPlay, FlowState, SkillInfo } from '../types'
 import { discoverSkills, sourceLabel, type FsLike } from './discover'
 import { FLOW_SYSTEM, flowPrompt, hashText, headingFlow, parseFlow, resolveFlowModel } from './flow'
-import { BOX_MIN, fit, flowAgents, layoutFlow, type FlowLine, type FlowSeg, type FlowTone } from './layout'
+import { BOX_MIN, fit, flowAgents, hasSideAgents, layoutFlow, type FlowLine, type FlowSeg, type FlowTone } from './layout'
+import { TICK_MS, frameAt, timeline, type PlayFrame } from './play'
 
 const PANE = 'cc-skill-map'
 const COMMAND = 'cc-skill-map'
@@ -15,6 +16,42 @@ const scanErrorAtom = atom({ plugin: 'cc-skill-map', key: 'scanError' } as const
 const selectedAtom = atom({ plugin: 'cc-skill-map', key: 'selected' } as const, null as string | null)
 const flowsAtom = atom({ plugin: 'cc-skill-map', key: 'flows' } as const, {} as Record<string, FlowState>)
 const promptsAtom = atom({ plugin: 'cc-skill-map', key: 'prompts' } as const, {} as Record<string, string>)
+const playAtom = atom({ plugin: 'cc-skill-map', key: 'play' } as const, null as FlowPlay | null)
+
+// 再生の描き直しのタイマー。再生しているあいだだけ回す。ホットリロードではエンジンが止める
+let ticker: Timer | undefined
+
+const stopTicker = (): void => {
+  ticker?.cancel()
+  ticker = undefined
+}
+
+/** 描き直しの1回ぶん。ペインが隠れたか再生をやめたら止める。最後まで再生したかは描く側で見て止める */
+const tick = async ($: EngineInterface): Promise<void> => {
+  const shown = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
+  if (!shown || (await read($, playAtom)) === null) {
+    stopTicker()
+    return
+  }
+  $.ui.invalidate('ui.render')
+}
+
+const animate = ($: EngineInterface): void => {
+  if (ticker !== undefined) return
+  ticker = $.clock.every(TICK_MS, () => void tick($).catch(stopTicker))
+}
+
+/** 流れを頭から再生する */
+const startPlay = async ($: EngineInterface, skill: string): Promise<void> => {
+  const startedAt = await $.clock.now()
+  await update($, playAtom, () => ({ skill, startedAt }))
+  animate($)
+}
+
+const stopPlay = async ($: EngineInterface): Promise<void> => {
+  await update($, playAtom, () => null)
+  stopTicker()
+}
 
 /** 組み込みのスキルの本文として覚えておく長さの上限 */
 const PROMPT_MAX = 60_000
@@ -140,12 +177,30 @@ const loadFlow = async ($: EngineInterface, skill: SkillInfo, model: string | un
   await setFlow($, skill.name, { status: 'ready', flow, hash, model })
 }
 
-/** スキルを開く。流れの読み取りは後ろで行い、押した操作を待たせない */
+/** スキルを開く。流れの読み取りは後ろで行い、押した操作を待たせない。読み取れたら頭から再生する */
 const openSkill = async ($: EngineInterface, name: string, model: string | undefined): Promise<void> => {
   await update($, selectedAtom, () => name)
+  await update($, playAtom, () => null)
   const skill = (await read($, skillsAtom))?.find(one => one.name === name)
   if (skill === undefined) return
-  await $.clock.after(0, () => void loadFlow($, skill, model).catch(() => undefined))
+  await $.clock.after(
+    0,
+    () =>
+      void (async () => {
+        await loadFlow($, skill, model)
+        // 読み取っているあいだに別のスキルへ移っていたら、再生しない
+        const state = (await read($, flowsAtom))[name]
+        if (state?.status === 'ready' && state.flow.steps.length > 0 && (await read($, selectedAtom)) === name) {
+          await startPlay($, name)
+        }
+      })().catch(() => undefined),
+  )
+}
+
+/** 一覧に戻る。再生もやめる */
+const backToList = async ($: EngineInterface): Promise<void> => {
+  await update($, selectedAtom, () => null)
+  await stopPlay($)
 }
 
 /** 一覧を読み直し、開いているスキルがあれば流れも読み直す */
@@ -213,12 +268,31 @@ export const register: Register = (on, options) => {
     if (skill !== undefined) {
       const state = (await read($, flowsAtom))[skill.name]
       const agents = [...new Set([...skill.agents, ...(state?.status === 'ready' ? flowAgents(state.flow) : [])])]
+      // 再生しているなら、始めてからの時間の1コマを描く。最後まで再生したらタイマーを止め、終えた姿のまま残す
+      const play = await read($, playAtom)
+      const playable = state?.status === 'ready' && state.flow.steps.length > 0
+      let frame: ReturnType<typeof frameAt> | undefined
+      if (playable && play !== null && play.skill === skill.name) {
+        frame = frameAt(state.flow, timeline(state.flow, hasSideAgents(state.flow, width)), (await $.clock.now()) - play.startedAt)
+        if (frame.isFinished) stopTicker()
+        else animate($)
+      }
+      const playing = frame !== undefined && !frame.isFinished
       return (
         <Box flexDirection="column" width={width}>
           <Box flexDirection="row" gap={1}>
-            <Button key="back" hotkey="b" onPress={() => void update($, selectedAtom, () => null)}>
+            <Button key="back" hotkey="b" onPress={() => backToList($)}>
               一覧に戻る
             </Button>
+            {!playable ? null : playing ? (
+              <Button key="stop" hotkey="p" onPress={() => stopPlay($)}>
+                止める
+              </Button>
+            ) : (
+              <Button key="play" hotkey="p" onPress={() => startPlay($, skill.name)}>
+                {frame === undefined ? '▶ 再生' : '▶ もう一度'}
+              </Button>
+            )}
             <Button key="reload" hotkey="r" dimColor onPress={() => reload($, flowModel)}>
               読み直す
             </Button>
@@ -239,7 +313,7 @@ export const register: Register = (on, options) => {
               <Text color="permission">{agents.filter(one => !skill.agents.includes(one)).join('、')}</Text>
             </Text>
           ) : null}
-          <FlowBody Box={Box} Text={Text} state={state} width={width} />
+          <FlowBody Box={Box} Text={Text} state={state} width={width} frame={frame} />
           {skill.path === undefined ? null : (
             <Text dimColor wrap="truncate">
               {skill.path}
@@ -304,7 +378,19 @@ type TextElement = Elements['Text']
 type BoxElement = Elements['Box']
 
 /** 流れの本体。読み取りの様子に応じて、待ち・理由・箱の並びを出す */
-const FlowBody = ({ Box, Text, state, width }: { Box: BoxElement; Text: TextElement; state: FlowState | undefined; width: number }) => {
+const FlowBody = ({
+  Box,
+  Text,
+  state,
+  width,
+  frame,
+}: {
+  Box: BoxElement
+  Text: TextElement
+  state: FlowState | undefined
+  width: number
+  frame?: PlayFrame
+}) => {
   if (state === undefined || state.status === 'loading') {
     return <Text dimColor>流れを読み取っています…{state === undefined ? '' : `(${state.model})`}</Text>
   }
@@ -330,7 +416,7 @@ const FlowBody = ({ Box, Text, state, width }: { Box: BoxElement; Text: TextElem
       {flow.by === 'headings' ? <Text dimColor wrap="wrap">見出しから作った簡易な流れです(担い手・承認・成果物は出ません)</Text> : null}
       {flow.steps.length === 0 ? <Text dimColor>手順の見出しがありません</Text> : null}
       {flow.by === 'model' ? <Legend Text={Text} /> : null}
-      {layoutFlow(flow, width).map(line => (
+      {layoutFlow(flow, width, frame).map(line => (
         <FlowRow key={line.key} Text={Text} line={line} />
       ))}
     </Box>
@@ -342,13 +428,23 @@ type FlowStyle = { color?: string; dimColor?: boolean; bold?: boolean; italic?: 
 /** 流れの色分け。色はテーマのキーにして、明るいテーマでも読めるようにする */
 const FLOW_STYLE: Record<FlowTone, FlowStyle> = {
   edge: { color: 'subtle' },
+  live: { color: 'claude', bold: true },
+  doneEdge: { color: 'subtle', dimColor: true },
   no: { dimColor: true },
   title: { bold: true },
   detail: { dimColor: true },
   actor: {},
   gate: { color: 'warning' },
+  ok: { color: 'success' },
   output: { color: 'success' },
+  outputNew: { color: 'success', bold: true, italic: true },
   branch: { color: 'suggestion' },
+  branchLive: { color: 'claude', bold: true },
+  flow: { color: 'claude', bold: true },
+  flowTrail: { color: 'claude' },
+  back: { color: 'success', bold: true },
+  backTrail: { color: 'success' },
+  spin: { color: 'claude', bold: true },
   head: { bold: true },
   note: { dimColor: true },
 }

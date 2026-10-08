@@ -49,6 +49,7 @@ const answerWorld = (on: On, world: World, stored: Record<string, unknown> = {})
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'cc-skill-map', isShown: true }] as never }))
   on('session.root', () => ({ value: ROOT }))
   // スキルの本文は、エンジンが展開したまま返す
   on('skill.prompt', ($, e) => ({ text: e.text }))
@@ -139,15 +140,18 @@ test('スキルを押すと、モデルで読み取った流れを、担い手�
   const ui = await mountPane($, 'terminal')
   await ui.press({ key: 'skill:notes' })
   await clock.settle()
-
   expect(world.modelCalls).toHaveLength(1)
   expect(world.modelCalls[0].model).toBe('haiku')
   expect(world.modelCalls[0].prompt).toContain('## 整える')
+
+  // 読み取れたら頭から再生する。最後まで進めて、終えた姿を見る
+  await clock.advance(60_000)
   expect(await ui.find({ text: 'メモを整えて保存する' })).toBeDefined()
   expect(await ui.find({ text: /持たせているサブエージェント: writer/ })).toBeDefined()
   expect(await ui.find({ text: /流れに出てくるサブエージェント: researcher/ })).toBeDefined()
   expect(await ui.find({ text: /╭─ 1 ─+ 人 ─╮/ })).toBeDefined()
-  expect(await ui.find({ text: /╭─ 4 ─+ サブエージェント researcher ─╮/ })).toBeDefined()
+  // 幅 60 では、サブエージェントの手順はメインの列から横に線を出した箱
+  expect(await ui.find({ text: /├─+▶│ 調べる ✓ +│/ })).toBeDefined()
   expect(await ui.find({ text: /⏸ ここで人の承認を待つ/ })).toBeDefined()
   expect(await ui.find({ text: /↩ 2「整える」へ戻る/ })).toBeDefined()
   expect(await ui.find({ text: /▸ 整えたメモ — notes\// })).toBeDefined()
@@ -156,6 +160,38 @@ test('スキルを押すと、モデルで読み取った流れを、担い手�
   // 一覧に戻れる
   await ui.press({ key: 'back' })
   expect(await ui.find({ text: 'スキル 3 件' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('開くと手順の順に再生し、止める・もう一度ができる', async ($, on) => {
+  const world = newWorld()
+  const clock = answerWorld(on, world)
+  await start($)
+  await run($)
+
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'skill:notes' })
+  await clock.settle()
+  // 再生中: 手順1を進めていて、成果物はまだ無い
+  await clock.advance(300)
+  expect(await ui.find({ type: 'Button', text: '止める' })).toBeDefined()
+  expect(await ui.find({ text: /│ メモを受け取る [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] +│/ })).toBeDefined()
+  expect(await ui.find({ text: 'まだありません' })).toBeDefined()
+
+  // 2 つめの手順へ進むと、1 つめに ✓ が付く
+  await clock.advance(1500)
+  expect(await ui.find({ text: /│ メモを受け取る ✓ +│/ })).toBeDefined()
+
+  // 止めると、再生前の姿に戻る
+  await ui.press({ key: 'stop' })
+  expect(await ui.find({ type: 'Button', text: '▶ 再生' })).toBeDefined()
+  expect(await ui.find({ text: /│ メモを受け取る +│/ })).toBeDefined()
+
+  // 再生して最後まで行くと、もう一度を出す
+  await ui.press({ key: 'play' })
+  await clock.advance(60_000)
+  expect(await ui.find({ type: 'Button', text: '▶ もう一度' })).toBeDefined()
+  expect(await ui.find({ text: /│ 保存する ✓ +│/ })).toBeDefined()
   await ui.unmount()
 })
 
