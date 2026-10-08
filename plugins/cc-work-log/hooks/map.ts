@@ -66,7 +66,7 @@ export type MapLine = { key: string; segs: MapSeg[] }
 export const TYPE_HUES = 6
 
 /** マップに置くサブエージェント1体 */
-type Item = {
+export type Item = {
   id: string
   agent: WorkLogAgent
   status: WorkLogStatus
@@ -78,7 +78,7 @@ type Item = {
   tool?: string
 }
 
-type Scene = {
+export type Scene = {
   main: { status: WorkLogStatus; endText?: string; tool?: string }
   items: Item[]
 }
@@ -138,7 +138,7 @@ const runningTool = (
 }
 
 /** 置くエージェントを、親子をたどる順(親の次にその子)に、起動した順で並べる。親が置かれていなければメインから起動したものとして扱う */
-const order = (ids: readonly string[], agents: Record<string, WorkLogAgent>): Array<{ id: string; depth: number }> => {
+export const order = (ids: readonly string[], agents: Record<string, WorkLogAgent>): Array<{ id: string; depth: number }> => {
   const shown = new Set(ids)
   const byNo = [...ids].sort((a, b) => (agentOf(agents, a)?.no ?? 0) - (agentOf(agents, b)?.no ?? 0))
   const parentOf = (id: string): string | undefined => {
@@ -154,7 +154,7 @@ const order = (ids: readonly string[], agents: Record<string, WorkLogAgent>): Ar
   return out
 }
 
-const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLogAgent>, now: number): Scene => {
+export const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLogAgent>, now: number): Scene => {
   const last = splitTurns(list).at(-1)
   const spawnIds = new Set<string>()
   for (const id of Object.keys(agents)) {
@@ -199,11 +199,11 @@ const buildScene = (list: readonly WorkLogEntry[], agents: Record<string, WorkLo
   }
 }
 
-const inFlight = (at: number | undefined, now: number): boolean =>
+export const inFlight = (at: number | undefined, now: number): boolean =>
   at !== undefined && now >= at && now - at < FLIGHT_MS
 
 /** 結果の粒がメインに届き、カードが光っているか */
-const flashing = (items: readonly Item[], now: number): boolean =>
+export const flashing = (items: readonly Item[], now: number): boolean =>
   items.some(
     item =>
       item.depth === 0 &&
@@ -253,10 +253,10 @@ const putText = (row: Row, col: number, text: string, tone: MapTone, hue?: numbe
   return at
 }
 
-const spinner = (now: number): string => SPIN[Math.floor(now / TICK_MS) % SPIN.length] ?? '•'
+export const spinner = (now: number): string => SPIN[Math.floor(now / TICK_MS) % SPIN.length] ?? '•'
 
 /** 種類を短くする。general-purpose は general に */
-const shortType = (type: string): string => (type === 'general-purpose' ? 'general' : type)
+export const shortType = (type: string): string => (type === 'general-purpose' ? 'general' : type)
 
 /** 種類ごとに決まる色の番号 */
 export const hueOf = (type: string): number => {

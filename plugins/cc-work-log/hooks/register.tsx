@@ -17,6 +17,7 @@ import {
   summaryPrompt,
 } from './describe'
 import { TICK_MS, isMapAnimating, layoutMap, type MapLine, type MapTone } from './map'
+import { layoutPixelMap } from './pixelmap'
 import { layoutTree, type TreeLine } from './tree'
 
 const PANE = 'cc-work-log'
@@ -322,6 +323,24 @@ export const register: Register = (on, options) => {
 
     if (view === 'map') {
       const now = await $.clock.now()
+      // ドット絵の Raster はターミナルにしかないので、ほかの面では文字のマップを出す
+      if (e.surface === 'terminal') {
+        const { Raster } = $.ui.resolve(e)
+        const { raster, lines } = layoutPixelMap(list, known, mainModel, now, room, width)
+        return (
+          <Box flexDirection="column" width={width}>
+            {header}
+            <Box flexDirection="row" gap={2}>
+              <Raster key="map-pixels" {...raster} />
+              <Box flexDirection="column" flexGrow={1}>
+                {lines.map(line => (
+                  <MapRow key={line.key} Text={Text} line={line} />
+                ))}
+              </Box>
+            </Box>
+          </Box>
+        )
+      }
       return (
         <Box flexDirection="column" width={width}>
           {header}
