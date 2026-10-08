@@ -1,0 +1,23 @@
+{
+  "name": "cc-work-log",
+  "version": "0.2.0",
+  "description": "エージェントとサブエージェントの作業(読む・編集・実行など)を日本語の短い文でペインに流す",
+  "author": { "name": "lu-llc" },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "summaryModel": {
+      "type": "string",
+      "title": "要約に使うモデル",
+      "description": "ターンの終わりに、そのターンの作業を1〜2行に要約するモデル。off で要約しない。custom は summaryModelCustom の値を使う",
+      "options": ["off", "haiku", "sonnet", "opus", "custom"],
+      "default": "off"
+    },
+    "summaryModelCustom": {
+      "type": "string",
+      "title": "要約に使うモデル(自由指定)",
+      "description": "summaryModel が custom のときだけ使う。モデル ID や略称",
+      "default": ""
+    }
+  }
+}
