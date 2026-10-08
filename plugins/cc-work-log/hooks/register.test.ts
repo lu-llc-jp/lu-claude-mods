@@ -140,7 +140,7 @@ test('ツールを介さないサブエージェントの起動を1行出し、i
 
   await spawnExplore($)
 
-  expect(state.agents).toEqual({ 'agent-1': { no: 1, name: 'テストを調べる', type: 'Explore', model: 'haiku' } })
+  expect(state.agents).toMatchObject({ 'agent-1': { no: 1, name: 'テストを調べる', type: 'Explore', model: 'haiku' } })
   expect((await texts($)).at(-1)).toBe('サブエージェント #1 Explore·haiku『テストを調べる』を起動')
 })
 
@@ -155,6 +155,8 @@ test('Agent ツールの起動の行に、番号・種類・モデルを書き�
   await spawnExplore($, line?.id)
 
   expect(await texts($)).toEqual(['サブエージェント #1 Explore·haiku-5-5『テストを調べる』を起動'])
+  // ツリーでは、この行の位置に枝を出す
+  expect(state.agents).toMatchObject({ 'agent-1': { spawnEntryId: line?.id } })
 })
 
 test('SubagentHandback はログに出さない', async ($, on) => {
@@ -361,4 +363,74 @@ test('custom で空なら要約しない理由を出す', () => {
   expect(resolveSummaryModel('haiku', '')).toBe('haiku')
   expect(resolveSummaryModel('custom', ' claude-haiku-5-5 ')).toBe('claude-haiku-5-5')
   expect(resolveSummaryModel('custom', '')).toBe('')
+})
+
+const subTurn = ($: Engine, agentId: string, durationMs: number) =>
+  $.turn.complete({ answer: '', durationMs, isAborted: false, turnId: `sub-${agentId}`, reason: 'answer', agentId })
+
+test('起動したサブエージェントの親・起動の行・状態を覚え、終えたら所要時間を足す', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
+  await start($)
+
+  await spawnExplore($)
+  expect(state.agents).toEqual({
+    'agent-1': {
+      no: 1,
+      name: 'テストを調べる',
+      type: 'Explore',
+      model: 'haiku',
+      spawnEntryId: 'spawn:agent-1',
+      status: 'running',
+    },
+  })
+
+  await subTurn($, 'agent-1', 12_000)
+  const agent = (state.agents as Record<string, { status: string; durationMs: number }>)['agent-1']
+  expect([agent?.status, agent?.durationMs]).toEqual(['ok', 12_000])
+})
+
+test('ペインのボタンで一覧とツリーを行き来する', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `agent-${(n += 1)}` }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  await start($)
+
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+  await spawnExplore($, 'w1')
+  await spawnExplore($, 'w2')
+  await subTurn($, 'agent-1', 12_000)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    delete state.view
+    const ui = await mountPane($, surface)
+    // 初期値は一覧
+    expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
+    expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
+
+    await ui.press({ key: 'toggle-view' })
+    expect(await ui.find({ text: /メイン·opus-5-5 …/ })).toBeDefined()
+    expect(await ui.find({ text: /├─ #1 Explore·haiku『テストを調べる』 ✓ 12秒/ })).toBeDefined()
+    expect(await ui.find({ text: /└─ #2 Explore·haiku『テストを調べる』 …/ })).toBeDefined()
+
+    await ui.press({ key: 'toggle-view' })
+    expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('/config の view を tree にすると、ツリーで開く', { options: { view: 'tree' } }, async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  await start($)
+
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+
+  const ui = await mountPane($, 'terminal')
+  expect(await ui.find({ text: /└─ ✓ `a.ts` を読む/ })).toBeDefined()
+  expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
+  await ui.unmount()
 })
