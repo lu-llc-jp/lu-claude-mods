@@ -192,7 +192,8 @@ export const register: Register = (on, options) => {
         // Agent ツールの呼び出しはすでに「…を起動」の行がある。種類とモデルはここで分かるので、その行を書き換える。
         // ワークフローなどツールを介さない起動だけ行を足す
         const hasToolLine = e.workflow === undefined && list.some(one => one.id === e.tool_use_id)
-        const agent: WorkLogAgent = {
+        const startedAt = await $.clock.now()
+        let agent: WorkLogAgent = {
           no: Object.keys(known).length + 1,
           name: oneLine(e.description !== '' ? e.description : e.subagentType, 30),
           type: e.subagentType,
@@ -200,9 +201,13 @@ export const register: Register = (on, options) => {
           parentId: e.parentAgentId,
           spawnEntryId: hasToolLine ? e.tool_use_id : `spawn:${agentId}`,
           status: 'running',
-          startedAt: await $.clock.now(),
+          startedAt,
         }
-        await update($, agents, map => ({ ...map, [agentId]: agent }))
+        // 通し番号は書き込む時点の数で決める。同時に起動すると、先に読んだ数では同じ番号が付くため
+        await update($, agents, map => {
+          agent = { ...agent, no: Object.keys(map).length + 1 }
+          return { ...map, [agentId]: agent }
+        })
         if (hasToolLine) {
           const text = describeSpawn(agent)
           await update($, entries, all => all.map(one => (one.id === e.tool_use_id ? { ...one, text } : one)))
@@ -320,7 +325,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" width={width}>
           {header}
-          {layoutMap(list, known, mainModel, now, room).map(line => (
+          {layoutMap(list, known, mainModel, now, room, width).map(line => (
             <MapRow key={line.key} Text={Text} line={line} />
           ))}
         </Box>
@@ -438,26 +443,46 @@ const TreeRow = ({ Text, line }: { Text: TextElement; line: TreeLine }) => {
   }
 }
 
-/** マップの色分け。枝は薄く、粒と光っている中心は目立たせる */
-const MAP_STYLE: Record<MapTone, { color?: string; dimColor?: boolean; bold?: boolean }> = {
-  edge: { dimColor: true },
-  flow: { color: 'suggestion', bold: true },
-  hub: { color: 'claude', bold: true },
-  hubIdle: { dimColor: true },
-  node: { color: 'permission', bold: true },
+type MapStyle = { color?: string; dimColor?: boolean; bold?: boolean; italic?: boolean }
+
+/** マップの色分け。線は薄く、動いているもの(粒・光・スピナー・メインの枠)だけに色を載せる。色はテーマのキーにして、明るいテーマでも読めるようにする */
+const MAP_STYLE: Record<MapTone, MapStyle> = {
+  edge: { color: 'subtle' },
+  live: { color: 'claude' },
+  flow: { color: 'claude', bold: true },
+  flowTrail: { color: 'claude' },
+  back: { color: 'success', bold: true },
+  backTrail: { color: 'success' },
+  hub: { color: 'claude' },
+  hubIdle: { color: 'subtle' },
+  hubFlash: { color: 'success', bold: true },
+  title: { bold: true },
+  spin: { color: 'claude', bold: true },
   ok: { color: 'success' },
   error: { color: 'error' },
+  no: { dimColor: true },
+  type: { bold: true },
   label: {},
-  tool: { dimColor: true },
+  labelDone: { dimColor: true },
+  cursor: { color: 'claude' },
+  tool: { dimColor: true, italic: true },
+  timeLive: { color: 'claude' },
   note: { dimColor: true },
   more: { dimColor: true },
 }
+
+/** エージェントの種類の色。種類ごとに hueOf で決まった番号の色を使う */
+const TYPE_COLORS: readonly string[] = ['permission', 'suggestion', 'remember', 'merged', 'autoAccept', 'planMode']
 
 /** マップの1行 */
 const MapRow = ({ Text, line }: { Text: TextElement; line: MapLine }) => (
   <Text wrap="truncate">
     {line.segs.map((seg, i) => (
-      <Text key={String(i)} {...MAP_STYLE[seg.tone]}>
+      <Text
+        key={String(i)}
+        {...MAP_STYLE[seg.tone]}
+        {...(seg.hue === undefined ? {} : { color: TYPE_COLORS[seg.hue % TYPE_COLORS.length] })}
+      >
         {seg.text}
       </Text>
     ))}

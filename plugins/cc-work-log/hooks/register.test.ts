@@ -3,6 +3,7 @@ import type { On } from 'claude-code'
 
 import type { WorkLogEntry } from '../types'
 import { describeTool, describeTurnEnd, resolveSummaryModel, shortModel } from './describe'
+import { TICK_MS } from './map'
 
 const CWD = '/work/app'
 
@@ -393,6 +394,18 @@ test('起動したサブエージェントの親・起動の行・状態・時�
   expect([agent?.status, agent?.durationMs, agent?.endedAt]).toEqual(['ok', 12_000, clock.now()])
 })
 
+test('同時に起動したサブエージェントにも、別々の通し番号を付ける', async ($, on) => {
+  answerBasics(on)
+  answerTools(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `agent-${(n += 1)}` }))
+  await start($)
+
+  await Promise.all([spawnExplore($, 'w1'), spawnExplore($, 'w2'), spawnExplore($, 'w3')])
+  const agents = state.agents as Record<string, { no: number }>
+  expect(Object.values(agents).map(one => one.no).sort()).toEqual([1, 2, 3])
+})
+
 test('ペインのボタンで一覧・ツリー・マップを順に回す', async ($, on) => {
   answerBasics(on)
   answerTools(on)
@@ -421,9 +434,9 @@ test('ペインのボタンで一覧・ツリー・マップを順に回す', as
 
     await ui.press({ key: 'toggle-view' })
     expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
-    expect(await ui.find({ text: /◉ メイン·opus-5-5/ })).toBeDefined()
-    expect(await ui.find({ text: /✓ #1 Explore·haiku『テストを調べる』 12秒/ })).toBeDefined()
-    expect(await ui.find({ text: /[●○] #2 Explore·haiku『テストを調べる』/ })).toBeDefined()
+    expect(await ui.find({ text: /╭─ ◉ メイン ─+ opus-5-5 ─╮/ })).toBeDefined()
+    expect(await ui.find({ text: /├[─◆]+✓ #1 Explore·haiku {2}テストを調べる +12秒/ })).toBeDefined()
+    expect(await ui.find({ text: /╰[─●]+[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #2 Explore·haiku / })).toBeDefined()
 
     await ui.press({ key: 'toggle-view' })
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
@@ -472,9 +485,11 @@ test('マップでは、サブエージェント2つに2本の枝が伸び、依
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await mountPane($, surface)
-    expect(await ui.find({ text: /╭─*▸─*[●○] #1 Explore·haiku/ })).toBeDefined()
-    expect(await ui.find({ text: /^◉ メイン/ })).toBeDefined()
-    expect(await ui.find({ text: /╰─*▸─*[●○] #2 Explore·haiku/ })).toBeDefined()
+    expect(await ui.find({ text: /^╭─ ◉ メイン/ })).toBeDefined()
+    expect(await ui.find({ text: /├.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #1 Explore·haiku/ })).toBeDefined()
+    expect(await ui.find({ text: /╰.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #2 Explore·haiku/ })).toBeDefined()
+    // 起動したての依頼の粒が、まだ道筋の上にいる
+    expect(await ui.find({ text: /●/ })).toBeDefined()
     expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
     await ui.unmount()
   }
@@ -487,10 +502,10 @@ test('マップは動いているあいだだけ描き直し、何も動いて�
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
   await start($)
 
-  // 実行中のサブエージェントがいるあいだは、1秒に5回描き直す
+  // 実行中のサブエージェントがいるあいだは、TICK_MS ごとに描き直す
   await spawnExplore($)
-  await clock.advance(1000)
-  expect(redraws.count).toBe(5)
+  await clock.advance(1500)
+  expect(redraws.count).toBe(1500 / TICK_MS)
 
   // 終えると、結果の粒が戻りきったところで止まる
   await subTurn($, 'agent-1', 1000)
@@ -498,7 +513,7 @@ test('マップは動いているあいだだけ描き直し、何も動いて�
   const settled = redraws.count
   await clock.advance(5000)
   expect(redraws.count).toBe(settled)
-  expect(settled).toBeLessThan(5 + 5 * 5)
+  expect(settled).toBeLessThan((1500 + 5000) / TICK_MS)
 
   // 一覧に切り替えていれば、動きがあっても描き直さない
   const ui = await mountPane($, 'terminal')
