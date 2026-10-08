@@ -61,6 +61,8 @@ export type FlowState =
       model?: string
       /** 見出しで代えた理由など、流れに添える一言 */
       note?: string
+      /** 直らない失敗(モデルが使えない・権限が無いなど)で見出しに代えたときの、そのモデル。同じモデルのあいだは開いても読み取り直さない */
+      stoppedModel?: string
     }
   | { status: 'none'; reason: string }
 

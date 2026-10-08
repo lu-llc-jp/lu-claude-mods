@@ -174,28 +174,36 @@ const whoOf = (step: FlowStep): string =>
 
 type Text = { text: string; tone: FlowTone; actor?: FlowActor }
 
+/** メインが自分で進める手順の数と、ほかへ依頼する手順の数 */
+const splitWork = (flow: SkillFlow) => {
+  const delegated = flow.steps.filter(one => STAGE_DELEGATED.includes(one.actor)).length
+  return { self: flow.steps.length - delegated, delegated }
+}
+
 /** メインのカードの中身(4行)。今していることを、メインを起点に言う */
 const mainTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
   const steps = flow.steps
+  const work = splitWork(flow)
+  const share: Text = { text: `自分で ${work.self} · 依頼 ${work.delegated}`, tone: 'detail' }
   if (frame === undefined) {
     const gates = steps.filter(one => one.gate === true).length
     return [
-      { text: flow.by === 'headings' ? '見出しから作った流れ' : 'スキルの流れ', tone: 'head' },
-      { text: `手順 ${steps.length}${gates === 0 ? '' : ` · 承認 ${gates} か所`}`, tone: 'detail' },
-      { text: `依頼先 ${workersOf(flow).length + (steps.some(one => one.actor === 'human') ? 1 : 0)}`, tone: 'detail' },
-      { text: '', tone: 'note' },
+      { text: flow.by === 'headings' ? '見出しから作った流れ' : `手順 ${steps.length}`, tone: 'head' },
+      share,
+      { text: gates === 0 ? '' : `承認 ${gates} か所`, tone: 'gate' },
     ]
   }
   if (frame.isFinished) {
+    // 再生でたどれなかった手順があれば、その数のまま出す(全部終えたように見せない)
+    const done = frame.done.length
     return [
-      { text: `✓ ${steps.length} 手順を終えた`, tone: 'ok' },
-      { text: '', tone: 'note' },
+      done === steps.length ? { text: `✓ 全 ${steps.length} 手順を終えた`, tone: 'ok' } : { text: `✓ 終了(${done}/${steps.length} 手順)`, tone: 'ok' },
+      share,
       { text: `成果物 ${frame.outputs.length}`, tone: 'detail' },
-      { text: '', tone: 'note' },
     ]
   }
   const now = nowOf(frame)
-  if (now === undefined) return [{ text: '', tone: 'note' }]
+  if (now === undefined) return []
   const status: Text = { text: `${spinOf(frame)} 手順 ${now.step + 1}/${steps.length}`, tone: 'spin' }
   const outputs: Text = { text: `成果物 ${frame.outputs.length}`, tone: 'detail' }
   const beat = now.beat
@@ -215,32 +223,33 @@ const mainTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
   return [status, { text: doing, tone: 'actor', actor: step.actor }, { text: step.title.trim(), tone: 'detail' }, outputs]
 }
 
-/** 人のカードの中身(4行) */
+/** 人のカードの中身(4行)。1行目に様子、続く3行に人の手順を並べ、人がどこで関わるかを見せる */
 const humanTexts = (flow: SkillFlow, frame: PlayFrame | undefined): Text[] => {
   const mine = flow.steps.flatMap((step, i) => (step.actor === 'human' ? [i] : []))
   if (mine.length === 0) return [{ text: '出番なし', tone: 'note' }]
-  if (frame === undefined) {
-    const first = flow.steps[mine[0]]
-    return [
-      { text: `出番 ${mine.length} 回`, tone: 'detail' },
-      { text: first.title.trim(), tone: 'detail' },
-      ...(mine.length > 1 ? [{ text: `ほか ${mine.length - 1} 手順`, tone: 'note' as const }] : []),
-    ]
-  }
   const now = nowOf(frame)
-  const done = mine.filter(i => frame.done.includes(i)).length
-  if (now !== undefined && now.beat.kind !== 'travel' && mine.includes(now.step)) {
-    const step = flow.steps[now.step]
-    const waiting = step.gate === true && now.beat.kind === 'wait'
+  const active = now !== undefined && now.beat.kind !== 'travel' && mine.includes(now.step) ? now.step : undefined
+  const done = frame === undefined ? 0 : mine.filter(i => frame.done.includes(i)).length
+
+  let status: Text
+  if (frame === undefined) status = { text: `人の手順 ${mine.length}`, tone: 'head' }
+  else if (active !== undefined) {
+    const waiting = flow.steps[active].gate === true && now?.beat.kind === 'wait'
     const blink = waiting && Math.floor(frame.elapsed / 450) % 2 === 1
-    return [
-      waiting ? { text: '⏸ 承認待ち', tone: blink ? 'note' : 'gate' } : { text: `${spinOf(frame)} 出番`, tone: 'spin' },
-      { text: step.title.trim(), tone: 'title' },
-      { text: step.detail ?? '', tone: 'detail' },
-      { text: `${done}/${mine.length} 手順`, tone: 'note' },
-    ]
-  }
-  return [{ text: done === mine.length ? `✓ ${done}/${mine.length} 手順` : `${done}/${mine.length} 手順`, tone: done === mine.length ? 'ok' : 'note' }]
+    status = waiting ? { text: '⏸ 承認待ち', tone: blink ? 'note' : 'gate' } : { text: `${spinOf(frame)} 出番`, tone: 'spin' }
+  } else status = { text: `${done === mine.length ? '✓ ' : ''}${done}/${mine.length} 手順`, tone: done === mine.length ? 'ok' : 'note' }
+
+  // 3行に入らなければ、今の手順(無ければ次にやる手順)のまわりを出す
+  const focus = active ?? mine.find(i => !(frame?.done.includes(i) ?? false)) ?? mine[mine.length - 1]
+  const at = mine.indexOf(focus)
+  const from = Math.max(0, Math.min(mine.length - 3, at - 1))
+  const rows = mine.slice(from, from + 3).map((i): Text => {
+    const title = `${i + 1} ${flow.steps[i].title.trim()}`
+    if (frame !== undefined && i === active) return { text: `${spinOf(frame)} ${title}`, tone: 'title' }
+    if (frame?.done.includes(i) === true) return { text: `✓ ${title}`, tone: 'detail' }
+    return { text: `· ${title}`, tone: 'plain' }
+  })
+  return [status, ...rows]
 }
 
 // ---- 配置 ----
@@ -294,7 +303,8 @@ const stepLine = (flow: SkillFlow, i: number, width: number, frame: PlayFrame | 
     segs: [
       mark,
       { text: ` ${no} `, tone: 'no' },
-      { text: fit(step.title.trim(), Math.max(4, room)), tone: active ? 'title' : frame !== undefined && frame.done.includes(i) ? 'detail' : 'title' },
+      // 今の手順だけを太くし、終えた手順は薄く、まだの手順は普通に出す
+      { text: fit(step.title.trim(), Math.max(4, room)), tone: active ? 'title' : frame !== undefined && frame.done.includes(i) ? 'detail' : 'plain' },
       ...tail,
       ...(jump === undefined ? [] : [jump]),
     ],
@@ -444,7 +454,7 @@ export const layoutStage = (
   }
   if (workers.length > shown.length) after.push({ key: 'workers:more', segs: [{ text: `ほか ${workers.length - shown.length} 体を省いた`, tone: 'note' }] })
 
-  // 成果物(見出しと1行)。入りきらなければ新しいものを残し、古いものは「ほか n」にまとめる
+  // 組織図の下の残りの行を、手順の一覧と成果物で分け合う。一覧を優先し、成果物には残りを回す
   const outputItems =
     frame === undefined
       ? [
@@ -454,40 +464,60 @@ export const layoutStage = (
           ]),
         ].map(text => ({ text, isNew: false }))
       : frame.outputs.map(one => ({ text: one.text, isNew: frame.elapsed - one.at < FLASH_MS }))
-  const outputLines: FlowLine[] = []
-  if (outputItems.length > 0 || frame !== undefined) {
-    const segs: FlowSeg[] = [{ text: '成果物 ', tone: 'head' }]
-    if (outputItems.length === 0) segs.push({ text: 'まだありません', tone: 'note' })
-    let used = cellWidth('成果物 ')
-    const kept: typeof outputItems = []
-    for (const item of [...outputItems].reverse()) {
-      const w = cellWidth(`▸ ${item.text}  `)
-      if (used + w > width - 8 && kept.length > 0) break
-      kept.unshift(item)
-      used += w
-    }
-    if (kept.length < outputItems.length) segs.push({ text: `ほか ${outputItems.length - kept.length}  `, tone: 'note' })
-    for (const item of kept) segs.push({ text: fit(`▸ ${item.text}`, Math.max(4, width - 10)), tone: item.isNew ? 'outputNew' : 'output' }, { text: '  ', tone: 'note' })
-    outputLines.push({ key: 'outputs', segs: trimmed(segs) })
-  }
+  const hasOutputs = outputItems.length > 0 || (frame !== undefined && (flow.outputs.length > 0 || steps.some(one => (one.outputs ?? []).length > 0)))
+  const left = Math.max(0, height - before.length - (band === undefined ? 0 : AVATAR_ROWS) - after.length)
+  // 成果物は見出しと3件ぶんを取っておく(それより少なければそのぶんだけ)
+  const outputReserve = hasOutputs ? 2 + Math.min(3, Math.max(1, outputItems.length)) : 0
+  const listRows = Math.min(2 + steps.length, Math.max(5, left - outputReserve))
+  const outputRows = Math.max(0, left - listRows)
 
-  // 手順の一覧。残りの行に収める
-  const used = before.length + (band === undefined ? 0 : AVATAR_ROWS) + after.length + outputLines.length + 2
-  const room = Math.max(3, height - used)
+  // 手順の一覧。入りきらなければ、今の手順のまわりだけを出す
   const listWidth = Math.min(width, STAGE_MAX)
+  const visible = listRows - 2
   let from = 0
   let to = steps.length
-  if (steps.length > room) {
-    const visible = room - 2
+  if (steps.length > visible) {
+    const inner = Math.max(1, visible - 2)
     const focus = now?.step ?? (frame?.isFinished === true ? steps.length - 1 : 0)
-    from = Math.max(0, Math.min(steps.length - visible, focus - Math.floor(visible / 2)))
-    to = from + visible
+    from = Math.max(0, Math.min(steps.length - inner, focus - Math.floor(inner / 2)))
+    to = from + inner
   }
   after.push({ key: 'list:gap', segs: [] })
   after.push({ key: 'list:head', segs: [{ text: '手順', tone: 'head' }] })
   if (from > 0) after.push({ key: 'list:before', segs: [{ text: `  … 前に ${from} 手順`, tone: 'note' }] })
   for (let i = from; i < to; i += 1) after.push(stepLine(flow, i, listWidth, frame))
   if (to < steps.length) after.push({ key: 'list:after', segs: [{ text: `  … 後に ${steps.length - to} 手順`, tone: 'note' }] })
-  after.push(...outputLines)
+
+  // 成果物。1件1行で並べ、入りきらなければ新しいものを残して、古いものは「ほか n 件」にまとめる
+  if (hasOutputs) {
+    const item = (one: { text: string; isNew: boolean }, k: number): FlowLine => ({
+      key: `outputs:${k}`,
+      segs: [{ text: fit(`▸ ${one.text}`, listWidth), tone: one.isNew ? 'outputNew' : 'output' }],
+    })
+    const slots = outputRows - 2
+    if (slots >= 1) {
+      after.push({ key: 'outputs:gap', segs: [] })
+      after.push({ key: 'outputs:head', segs: [{ text: `成果物 ${outputItems.length}`, tone: 'head' }] })
+      if (outputItems.length === 0) after.push({ key: 'outputs:none', segs: [{ text: 'まだありません', tone: 'note' }] })
+      else if (outputItems.length <= slots) outputItems.forEach((one, k) => after.push(item(one, k)))
+      else {
+        const kept = outputItems.slice(outputItems.length - (slots - 1))
+        after.push({ key: 'outputs:more', segs: [{ text: `ほか ${outputItems.length - kept.length} 件`, tone: 'note' }] })
+        kept.forEach((one, k) => after.push(item(one, outputItems.length - kept.length + k)))
+      }
+    } else {
+      // 行が足りなければ、件数と最新の1件だけを1行で出す
+      const last = outputItems.at(-1)
+      after.push({
+        key: 'outputs',
+        segs: [
+          { text: `成果物 ${outputItems.length} `, tone: 'head' },
+          last === undefined
+            ? { text: 'まだありません', tone: 'note' }
+            : { text: fit(`▸ ${last.text}`, Math.max(4, listWidth - 12)), tone: last.isNew ? 'outputNew' : 'output' },
+        ],
+      })
+    }
+  }
   return { before, ...(band === undefined ? {} : { band }), after }
 }

@@ -159,6 +159,23 @@ test('再生では、成果物は手順を終えたときに出て、出たば�
   ])
 })
 
+test('戻り先しか書かれていない手順からも、次の手順へ線を下ろす', () => {
+  const flow: SkillFlow = {
+    by: 'model',
+    steps: [
+      { id: 'a', title: '確かめる', actor: 'human' },
+      { id: 'b', title: '直す', actor: 'ai', next: ['a'] },
+      { id: 'c', title: '書き出す', actor: 'script' },
+    ],
+    outputs: [],
+  }
+  const lines = layoutFlow(flow, 30).map(textOf)
+  const back = lines.indexOf('  ↩ 1「確かめる」へ戻る')
+  expect(back).toBeGreaterThan(0)
+  expect(lines[back - 1]).toMatch(/┬/)
+  expect(lines[back + 2]).toBe(`${' '.repeat(15)}▼`)
+})
+
 test('担い手の呼び名と、流れに出てくるサブエージェント', () => {
   expect(actorLabel({ actor: 'script' })).toBe('スクリプト')
   expect(actorLabel({ actor: 'subagent' })).toBe('サブエージェント')

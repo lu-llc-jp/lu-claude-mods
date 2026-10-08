@@ -24,7 +24,8 @@ export type Beat =
 
 /**
  * 実行される順に手順をたどる。
- * next が無ければ並びの次へ、空なら終わり。戻り(前の手順へ)はそれぞれ1回だけたどり、2回目からは先へ進む
+ * next が無ければ並びの次へ、空なら終わり。戻り(前の手順へ)はそれぞれ1回だけたどり、2回目からは先へ進む。
+ * 先へ進む行き先が書かれていなければ、並びの次へ進む
  */
 export const visitOrder = (flow: SkillFlow): number[] => {
   const steps = flow.steps
@@ -48,7 +49,11 @@ export const visitOrder = (flow: SkillFlow): number[] => {
       continue
     }
     const forward = targets.filter(at => at > i)
-    if (forward.length === 0) break
+    // 戻り先しか書かれていなければ、戻りをたどったあとは並びの次へ進む(モデルは戻りだけを next に書くことがある)
+    if (forward.length === 0) {
+      i += 1
+      continue
+    }
     // 並びの次があればそちらを、無ければいちばん近い飛び先を選ぶ
     i = forward.includes(i + 1) ? i + 1 : Math.min(...forward)
   }

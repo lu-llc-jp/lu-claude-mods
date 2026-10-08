@@ -42,7 +42,15 @@ const LISTED = [
 type World = { files: Record<string, string>; modelCalls: Array<{ model: string; prompt: string }>; reply: () => unknown }
 
 /** エンジンの代わりに、コンテキストの内訳・ファイル・モデル・保存領域・時計に答える */
+/** mod が $.state に書いた値を拾う(テストの $ には state が無いため) */
+const state: Record<string, unknown> = {}
+
 const answerWorld = (on: On, world: World, stored: Record<string, unknown> = {}) => {
+  for (const key of Object.keys(state)) delete state[key]
+  on('state.set', ($, e, next) => {
+    if (e.plugin === 'cc-skill-map') state[e.key] = e.value
+    return next(e)
+  })
   const clock = mock.clock(on, { now: Date.parse('2026-10-09T05:00:00Z') })
   mock.store(on, stored)
   mock.env(on, { HOME, CLAUDE_CONFIG_DIR: CFG })
@@ -315,6 +323,66 @@ test('組み込みのスキルは、呼ばれるまでは理由を出し、呼�
   expect(world.modelCalls[0].prompt).toContain('## 間隔を決める')
   expect(await ui.find({ text: 'メモを整えて保存する' })).toBeDefined()
   await ui.unmount()
+})
+
+const apiError = (status: number) => ({ isAnswered: false, reason: 'api-error', status, error: 'invalid_request_error' })
+
+test('直らない失敗(4xx)なら、開き直しても読み取り直さず、読み直すボタンでやり直す', async ($, on) => {
+  const world = newWorld()
+  world.reply = () => apiError(400)
+  const clock = answerWorld(on, world)
+  await start($)
+  await run($)
+
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'skill:notes' })
+  await clock.settle()
+  expect(world.modelCalls).toHaveLength(1)
+  expect(await ui.find({ text: /API エラー\(400 invalid_request_error\)。設定を変えるか「読み直す」を押すまで、読み取り直しません/ })).toBeDefined()
+
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'skill:notes' })
+  await clock.settle()
+  expect(world.modelCalls).toHaveLength(1)
+
+  await ui.press({ key: 'reload' })
+  await clock.settle()
+  expect(world.modelCalls).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('一時的な失敗(5xx・429)なら、次に開いたときにまた試す', async ($, on) => {
+  const world = newWorld()
+  world.reply = () => apiError(529)
+  const clock = answerWorld(on, world)
+  await start($)
+  await run($)
+
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'skill:notes' })
+  await clock.settle()
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'skill:notes' })
+  await clock.settle()
+  expect(world.modelCalls).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('呼ばれたスキルの本文は、SKILL.md の無いものだけを、新しい 10 件まで覚える', async ($, on) => {
+  answerWorld(on, newWorld())
+  await start($)
+  // 一覧を読む前は出どころが分からないので覚え、一覧を読んだら SKILL.md のあるものは捨てる
+  await $.skill.prompt({ skill: 'notes', text: '# notes' })
+  expect(Object.keys((state.prompts ?? {}) as object)).toEqual(['notes'])
+  await run($)
+  expect(state.prompts).toEqual({})
+
+  for (let i = 1; i <= 12; i += 1) await $.skill.prompt({ skill: `builtin-${i}`, text: `# ${i}` })
+  await $.skill.prompt({ skill: 'notes', text: '# notes' })
+  const kept = Object.keys((state.prompts ?? {}) as object)
+  expect(kept).toHaveLength(10)
+  expect(kept[0]).toBe('builtin-3')
+  expect(kept.at(-1)).toBe('builtin-12')
 })
 
 test('このセッションに無いスキル名を渡したら、そう答える', async ($, on) => {

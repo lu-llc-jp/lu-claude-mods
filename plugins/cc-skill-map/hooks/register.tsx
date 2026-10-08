@@ -55,8 +55,9 @@ const stopPlay = async ($: EngineInterface): Promise<void> => {
   stopTicker()
 }
 
-/** 組み込みのスキルの本文として覚えておく長さの上限 */
+/** 組み込みのスキルの本文として覚えておく長さと件数の上限。新しく呼ばれたものを残す */
 const PROMPT_MAX = 60_000
+const PROMPT_LIMIT = 10
 
 const errorText = (err: unknown): string => {
   const text = err instanceof Error ? err.message : String(err)
@@ -90,6 +91,9 @@ const scan = async ($: EngineInterface): Promise<void> => {
       root: await $.session.root(),
     })
     await update($, skillsAtom, () => skills)
+    // 一覧を読む前に覚えた本文のうち、SKILL.md のあるスキルのものは要らない
+    const withFile = new Set(skills.filter(one => one.path !== undefined).map(one => one.name))
+    await update($, promptsAtom, map => Object.fromEntries(Object.entries(map).filter(([name]) => !withFile.has(name))))
     await update($, scanErrorAtom, () => (breakdown === undefined ? 'コンテキストの内訳が取れませんでした' : null))
   } catch (err) {
     await update($, skillsAtom, previous => previous ?? [])
@@ -118,7 +122,7 @@ const skillText = async ($: EngineInterface, skill: SkillInfo): Promise<string |
  * モデルを使うなら、$.store に同じ本文とモデルで抽出したものがあれば使い回し、無ければ抽出する。
  * モデルを使わないとき・抽出に失敗したときは、見出しだけの流れにする
  */
-const loadFlow = async ($: EngineInterface, skill: SkillInfo, model: string | undefined): Promise<void> => {
+const loadFlow = async ($: EngineInterface, skill: SkillInfo, model: string | undefined, force = false): Promise<void> => {
   const text = await skillText($, skill)
   if (text === undefined) {
     await setFlow($, skill.name, {
@@ -133,8 +137,12 @@ const loadFlow = async ($: EngineInterface, skill: SkillInfo, model: string | un
   const hash = hashText(text)
   const current = (await read($, flowsAtom))[skill.name]
   if (current?.status === 'loading') return
-  // 失敗して見出しで代えたもの(note あり)は、開くたびに読み取りをやり直す
-  if (current?.status === 'ready' && current.hash === hash && current.model === model && current.note === undefined) return
+  // 一時的な失敗で見出しに代えたもの(note あり)は、開くたびに読み取りをやり直す。
+  // 直らない失敗で止めたものは、同じモデルのあいだはやり直さない(読み直すボタンからはやり直す)
+  if (current?.status === 'ready' && current.hash === hash) {
+    if (current.model === model && current.note === undefined) return
+    if (!force && model !== undefined && current.stoppedModel === model) return
+  }
 
   if (model === undefined) {
     await setFlow($, skill.name, { status: 'ready', flow: headingFlow(text), hash })
@@ -147,8 +155,14 @@ const loadFlow = async ($: EngineInterface, skill: SkillInfo, model: string | un
   }
 
   await setFlow($, skill.name, { status: 'loading', model })
-  const fallback = (reason: string) =>
-    setFlow($, skill.name, { status: 'ready', flow: headingFlow(text), hash, note: `流れを読み取れず、見出しで代えました(${model}): ${reason}` })
+  const fallback = (reason: string, permanent = false) =>
+    setFlow($, skill.name, {
+      status: 'ready',
+      flow: headingFlow(text),
+      hash,
+      note: `流れを読み取れず、見出しで代えました(${model}): ${reason}${permanent ? '。設定を変えるか「読み直す」を押すまで、読み取り直しません' : ''}`,
+      ...(permanent ? { stoppedModel: model } : {}),
+    })
   let result: Awaited<ReturnType<EngineInterface['model']['complete']>>
   try {
     result = await $.model.complete({
@@ -160,13 +174,18 @@ const loadFlow = async ($: EngineInterface, skill: SkillInfo, model: string | un
       timeoutMs: 90_000,
     })
   } catch (err) {
-    await fallback(errorText(err))
+    // 送る前に断られた(モデルが無い・組織が許可していない など)。繰り返しても直らない
+    await fallback(errorText(err), true)
     return
   }
   if (!result.isAnswered) {
-    await fallback(
-      result.reason === 'api-error' ? `API エラー(${result.status ?? '応答なし'} ${result.error})` : result.reason === 'empty-reply' ? '空の応答' : '時間切れ・中断',
-    )
+    if (result.reason === 'api-error') {
+      // 4xx はモデル名や権限の問題で、繰り返しても直らない。混雑(429)や一時的な障害は次に開いたときにまた試す
+      const permanent = result.status !== null && result.status >= 400 && result.status < 500 && result.status !== 429
+      await fallback(`API エラー(${result.status ?? '応答なし'} ${result.error})`, permanent)
+      return
+    }
+    await fallback(result.reason === 'empty-reply' ? '空の応答' : '時間切れ・中断')
     return
   }
   const flow = parseFlow(result.text)
@@ -180,7 +199,7 @@ const loadFlow = async ($: EngineInterface, skill: SkillInfo, model: string | un
 }
 
 /** スキルを開く。流れの読み取りは後ろで行い、押した操作を待たせない。読み取れたら頭から再生する */
-const openSkill = async ($: EngineInterface, name: string, model: string | undefined): Promise<void> => {
+const openSkill = async ($: EngineInterface, name: string, model: string | undefined, force = false): Promise<void> => {
   await update($, selectedAtom, () => name)
   await update($, playAtom, () => null)
   const skill = (await read($, skillsAtom))?.find(one => one.name === name)
@@ -189,7 +208,7 @@ const openSkill = async ($: EngineInterface, name: string, model: string | undef
     0,
     () =>
       void (async () => {
-        await loadFlow($, skill, model)
+        await loadFlow($, skill, model, force)
         // 読み取っているあいだに別のスキルへ移っていたら、再生しない
         const state = (await read($, flowsAtom))[name]
         if (state?.status === 'ready' && state.flow.steps.length > 0 && (await read($, selectedAtom)) === name) {
@@ -209,7 +228,7 @@ const backToList = async ($: EngineInterface): Promise<void> => {
 const reload = async ($: EngineInterface, model: string | undefined): Promise<void> => {
   await scan($)
   const name = await read($, selectedAtom)
-  if (name !== null) await openSkill($, name, model)
+  if (name !== null) await openSkill($, name, model, true)
 }
 
 export const register: Register = (on, options) => {
@@ -227,9 +246,13 @@ export const register: Register = (on, options) => {
   on('skill.prompt', async ($, e, next) => {
     const result = await next(e)
     try {
+      // SKILL.md のあるスキルは覚えない。一覧をまだ読んでいなければ分からないので覚え、一覧を読んだときに捨てる
       const skill = (await read($, skillsAtom))?.find(one => one.name === e.skill)
       if (skill?.path === undefined) {
-        await update($, promptsAtom, map => ({ ...map, [e.skill]: e.text.slice(0, PROMPT_MAX) }))
+        await update($, promptsAtom, map => {
+          const kept = Object.entries(map).filter(([name]) => name !== e.skill)
+          return Object.fromEntries([...kept.slice(-(PROMPT_LIMIT - 1)), [e.skill, e.text.slice(0, PROMPT_MAX)]])
+        })
       }
     } catch {
       // 覚えられなくてもスキルは止めない
@@ -513,6 +536,7 @@ const FLOW_STYLE: Record<FlowTone, FlowStyle> = {
   spin: { color: 'claude', bold: true },
   head: { bold: true },
   note: { dimColor: true },
+  plain: {},
 }
 
 /** 担い手の色 */

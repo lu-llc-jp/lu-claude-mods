@@ -48,9 +48,9 @@ test('組織図: 上にメインと人のカード、メインの下にスクリ
   expect(band).toBeUndefined()
   expect([...show(before), ...show(after)]).toEqual([
     '╭─ ◉ メイン ───────────────────────────╮        ╭─ ◉ 人 ───────────────────────╮',
-    '│ スキルの流れ                         │        │ 出番 2 回                    │',
-    '│ 手順 5 · 承認 1 か所                 │        │ メモを受け取る               │',
-    '│ 依頼先 3                             ├────────┤ ほか 1 手順                  │',
+    '│ 手順 5                               │        │ 人の手順 2                   │',
+    '│ 自分で 1 · 依頼 4                    │        │ · 1 メモを受け取る           │',
+    '│ 承認 1 か所                          ├────────┤ · 3 確かめる                 │',
     '│                                      │        │                              │',
     '╰───────────────────┬──────────────────╯        ╰──────────────────────────────╯',
     '  ╭─────────────────┴─────────╮',
@@ -66,7 +66,11 @@ test('組織図: 上にメインと人のカード、メインの下にスクリ
     '  3 確かめる 人 ⏸ ↩2',
     '  4 調べる サブエージェント researcher',
     '  5 保存する スクリプト',
-    '成果物 ▸ 下書き  ▸ notes/a.md  ▸ 整えたメモ — notes/',
+    '',
+    '成果物 3',
+    '▸ 下書き',
+    '▸ notes/a.md',
+    '▸ 整えたメモ — notes/',
   ])
 })
 
@@ -86,8 +90,10 @@ test('再生: 人への依頼は、メインと人をつなぐ線を粒が渡り
   expect(going[2]).toMatch(/│ 人 の承認を待つ|│ 人 に依頼/)
   const wait = startOf(beat => beat.kind === 'wait' && beat.step === 2)
   const waiting = show(textStage(wait + 100).before)
+  // 人のカードには、人の手順を並べ、終えたものに ✓、今のものに回る印を付ける
   expect(waiting[1]).toMatch(/│ ⏸ 承認待ち +│$/)
-  expect(waiting[2]).toMatch(/│ 確かめる +│$/)
+  expect(waiting[2]).toMatch(/│ ✓ 1 メモを受け取る +│$/)
+  expect(waiting[3]).toMatch(/┤ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 3 確かめる +│$/)
   expect(stageMoods(FLOW, frameAt(FLOW, beats, wait + 100)).human).toBe('busy')
   // 結果の粒が人からメインへ戻る
   const back = show(textStage(wait + WAIT_MS + DISPATCH_MS / 2).before)
@@ -126,8 +132,56 @@ test('再生: 手順の一覧に今と終えた手順の印を付け、戻りを
 test('最後まで再生したら、メインは終えた数を、担い手の箱は ✓ を出す', () => {
   const { before } = textStage(playLength(beats) + 1)
   const lines = show(before)
-  expect(lines[1]).toMatch(/│ ✓ 5 手順を終えた +│ +│ ✓ 2\/2 手順 +│/)
+  expect(lines[1]).toMatch(/│ ✓ 全 5 手順を終えた +│ +│ ✓ 2\/2 手順 +│/)
   expect(lines[10]).toMatch(/│ ✓ 1\/1 手順 +│ +│ ✓ 1\/1 手順 +│/)
+})
+
+test('戻り先しか書かれていない手順も、戻ったあと最後まで再生し、終えた数をそのまま出す', () => {
+  // モデルは「8 は 7 へ戻ることがある」を next: ['s7'] とだけ書くことがある
+  const flow: SkillFlow = {
+    by: 'model',
+    steps: [
+      { id: 's1', title: '作る', actor: 'ai' },
+      { id: 's2', title: '確かめる', actor: 'human', gate: true },
+      { id: 's3', title: '直す', actor: 'ai', next: ['s2'] },
+      { id: 's4', title: '書き出す', actor: 'script' },
+    ],
+    outputs: [],
+  }
+  const all = timeline(flow, STAGE_DELEGATED)
+  const end = frameAt(flow, all, playLength(all) + 1)
+  expect(end.done).toEqual([0, 1, 2, 3])
+  expect(show(layoutStage(flow, 80, 30, end, { avatars: false }).before)[1]).toMatch(/│ ✓ 全 4 手順を終えた/)
+  // 途中で終わる流れ(終わりを明示した手順がある)なら、終えた数で出す
+  const stop: SkillFlow = { ...flow, steps: flow.steps.map((one, i) => (i === 1 ? { ...one, next: [] } : one)) }
+  const stopBeats = timeline(stop, STAGE_DELEGATED)
+  const stopped = frameAt(stop, stopBeats, playLength(stopBeats) + 1)
+  expect(show(layoutStage(stop, 80, 30, stopped, { avatars: false }).before)[1]).toMatch(/│ ✓ 終了\(2\/4 手順\)/)
+})
+
+test('成果物は1件1行で並べ、入りきらなければ新しいものを残して「ほか n 件」にまとめる', () => {
+  const flow: SkillFlow = {
+    by: 'model',
+    steps: Array.from({ length: 6 }, (_, i) => ({ id: `s${i + 1}`, title: `手順${i + 1}`, actor: 'ai' as const, outputs: [`out${i + 1}`] })),
+    outputs: [],
+  }
+  const all = timeline(flow, STAGE_DELEGATED)
+  const end = frameAt(flow, all, playLength(all) + 1)
+  // 高さ 20: カード 6 行 + 一覧 8 行 = 14 行、残り 6 行に成果物(空行・見出し・4 件)
+  const lines = show(layoutStage(flow, 80, 20, end, { avatars: false }).after)
+  expect(lines.slice(-6)).toEqual(['', '成果物 6', 'ほか 3 件', '▸ out4', '▸ out5', '▸ out6'])
+  // 行が足りなければ、件数と最新の1件だけを1行で出す
+  const tight = show(layoutStage(flow, 80, 8, end, { avatars: false }).after)
+  expect(tight.at(-1)).toBe('成果物 6 ▸ out6')
+})
+
+test('手順の一覧では、今の手順だけを太くし、終えた手順は薄く、まだの手順は普通に出す', () => {
+  const t = startOf(beat => beat.kind === 'work' && beat.step === 1)
+  const { after } = textStage(t + 100)
+  const toneOf = (title: string) => after.find(one => textOf(one.segs).includes(title))?.segs.find(seg => seg.text.includes(title))?.tone
+  expect(toneOf('メモを受け取る')).toBe('detail')
+  expect(toneOf('整える')).toBe('title')
+  expect(toneOf('保存する')).toBe('plain')
 })
 
 test('手順が多くて入りきらなければ、今の手順のまわりだけを出し、高さに収める', () => {

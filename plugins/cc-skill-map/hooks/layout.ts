@@ -6,7 +6,7 @@ import { FLASH_MS, type PlayFrame } from './play'
  * edge: 箱と線、live: 進めている手順の枠と線、doneEdge: 終えた手順の枠、no: 手順の番号、title: 手順名、detail: 補足、
  * actor: 担い手(actor で色を変える)、gate: 承認を待つ所、ok: 終えた印、output・outputNew: 成果物(出たばかりは光らせる)、
  * branch・branchLive: 分岐・戻り(粒が渡っているもの)、flow・flowTrail: 依頼の粒とその尾、back・backTrail: 結果の粒とその尾、
- * spin: 進めている印、head: 見出し、note: 補足の文
+ * spin: 進めている印、head: 見出し、note: 補足の文、plain: 飾らない文
  */
 export type FlowTone =
   | 'edge'
@@ -29,6 +29,7 @@ export type FlowTone =
   | 'spin'
   | 'head'
   | 'note'
+  | 'plain'
 export type FlowSeg = { text: string; tone: FlowTone; actor?: FlowActor }
 export type FlowLine = { key: string; segs: FlowSeg[] }
 
@@ -117,11 +118,15 @@ const branchesOf = (steps: readonly FlowStep[], i: number): Array<{ to?: number;
     })
 }
 
-/** 次の手順へ線を下ろすか。終わりを明示した手順と、飛び先だけを持つ手順からは下ろさない */
+/**
+ * 次の手順へ線を下ろすか。終わりを明示した手順と、先への飛び先だけを持つ手順からは下ろさない。
+ * 戻り先だけを持つ手順は、戻ったあと並びの次へ進むので下ろす
+ */
 const flowsDown = (steps: readonly FlowStep[], i: number): boolean => {
   if (i === steps.length - 1) return false
   const next = steps[i].next
-  return next === undefined || next.includes(steps[i + 1].id)
+  if (next === undefined || next.includes(steps[i + 1].id)) return true
+  return next.length > 0 && next.every(id => steps.findIndex(one => one.id === id) <= i)
 }
 
 /** 手順の様子。再生していなければ idle */

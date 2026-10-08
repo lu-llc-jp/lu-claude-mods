@@ -15,6 +15,11 @@ test('戻りは1回だけたどってから先へ進む', () => {
   expect(visitOrder(flow)).toEqual([0, 1, 2, 1, 2, 3])
 })
 
+test('戻り先しか書かれていなければ、戻りを1回たどったあと並びの次へ進む', () => {
+  const flow = flowOf([step('a'), step('b'), step('c', { next: ['b'] }), step('d')])
+  expect(visitOrder(flow)).toEqual([0, 1, 2, 1, 2, 3])
+})
+
 test('飛び先へ進み、終わりの手順で止まる', () => {
   const flow = flowOf([step('a', { next: ['c'] }), step('b', { next: [] }), step('c', { next: [] }), step('d')])
   expect(visitOrder(flow)).toEqual([0, 2])
