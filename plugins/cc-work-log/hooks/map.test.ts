@@ -1,7 +1,20 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { WorkLogAgent, WorkLogEntry } from '../types'
-import { FLASH_MS, FLIGHT_MS, TICK_MS, buildScene, cellWidth, fit, formatTokens, isMapAnimating, layoutMap, mainMood, type MapLine } from './map'
+import {
+  FLASH_MS,
+  FLIGHT_MS,
+  STALE_MS,
+  TICK_MS,
+  buildScene,
+  cellWidth,
+  fit,
+  formatTokens,
+  isSceneAnimating,
+  layoutMap,
+  mainMood,
+  type MapLine,
+} from './map'
 
 const T0 = 1_000_000
 /** 起動から十分たち、粒も打ち出しも終わっている時刻。光の位置がそろうよう TICK_MS の倍数にする */
@@ -62,14 +75,14 @@ test('組織図のように、メインのカードの下に子の箱を横に�
     ' │ * 9秒           │ │ * 9秒           │',
     ' ╰─────────────────╯ ╰─────────────────╯',
   ])
-  // 箱の1行目(番号と種類)は押せる。押すとそのエージェントの詳細を開く
+  // 箱の1行目の番号は押せる。押すとそのエージェントの詳細を開く
   const title = layoutMap(twoAgents(), running, '', LATER, 30, 40)[8]
   expect(title?.segs.filter(seg => seg.press !== undefined).map(seg => [seg.text, seg.press])).toEqual([
-    ['#1 ', 'agent-1'],
-    ['Explore', 'agent-1'],
-    ['#2 ', 'agent-2'],
-    ['Explore', 'agent-2'],
+    ['#1', 'agent-1'],
+    ['#2', 'agent-2'],
   ])
+  // 種類はボタンにせず、種類ごとの色を付ける
+  expect(title?.segs.find(seg => seg.text === 'Explore')?.hue).toBeDefined()
 })
 
 test('サブエージェントが起動したものは、親の箱の下に並べる', () => {
@@ -201,25 +214,25 @@ test('文字幅は日本語を2マスと数え、はみ出すぶんは … に�
 })
 
 test('動いているものが無いときだけ、アニメーションは止まっている', () => {
-  expect(isMapAnimating(twoAgents(), running, LATER)).toBe(true)
+  expect(isSceneAnimating(buildScene(twoAgents(), running, null, LATER), LATER)).toBe(true)
 
   const done = { 'agent-1': agent(1, { status: 'ok', endedAt: T0 + 5000 }) }
   const list = [entry('call-1', '起動', T0)]
   // 結果の粒が流れ、カードが光っているあいだは動いている
-  expect(isMapAnimating(list, done, T0 + 5000 + FLIGHT_MS + FLASH_MS - 1)).toBe(true)
-  expect(isMapAnimating(list, done, T0 + 5000 + FLIGHT_MS + FLASH_MS)).toBe(false)
+  expect(isSceneAnimating(buildScene(list, done, null, T0 + 5000 + FLIGHT_MS + FLASH_MS - 1), T0 + 5000 + FLIGHT_MS + FLASH_MS - 1)).toBe(true)
+  expect(isSceneAnimating(buildScene(list, done, null, T0 + 5000 + FLIGHT_MS + FLASH_MS), T0 + 5000 + FLIGHT_MS + FLASH_MS)).toBe(false)
   // メインがツールを使っているあいだも動いている
-  expect(isMapAnimating([...list, entry('m', '検索', T0, { status: 'running' })], done, T0 + 60_000)).toBe(true)
+  expect(isSceneAnimating(buildScene([...list, entry('m', '検索', T0, { status: 'running' })], done, null, T0 + 60_000), T0 + 60_000)).toBe(true)
 })
 
 test('メインのキャラの様子は、結果が届いた・ツールを使っている・考えている・終えた、の順に決まる', () => {
-  expect(mainMood(buildScene(twoAgents(), running, null), LATER)).toBe('thinking')
-  expect(mainMood(buildScene([...twoAgents(), entry('m1', '検索', T0, { status: 'running' })], running, null), LATER)).toBe('busy')
+  expect(mainMood(buildScene(twoAgents(), running, null, LATER), LATER)).toBe('thinking')
+  expect(mainMood(buildScene([...twoAgents(), entry('m1', '検索', T0, { status: 'running' })], running, null, LATER), LATER)).toBe('busy')
   const end = T0 + 12_000
   const done = { ...running, 'agent-1': agent(1, { status: 'ok', durationMs: 12_000, endedAt: end }) }
-  expect(mainMood(buildScene(twoAgents(), done, null), end + FLIGHT_MS)).toBe('flash')
+  expect(mainMood(buildScene(twoAgents(), done, null, end + FLIGHT_MS), end + FLIGHT_MS)).toBe('flash')
   const finished = [...twoAgents(), entry('turn:t1', '回答した(2秒)', T0 + 1000, { kind: 'turn', status: 'ok' })]
-  expect(mainMood(buildScene(finished, {}, null), LATER)).toBe('done')
+  expect(mainMood(buildScene(finished, {}, null, LATER), LATER)).toBe('done')
 })
 
 test('消費トークンは、850・12.3k・1.2M のように短く書く', () => {
@@ -236,4 +249,33 @@ test('親を省いた子は、メインから起動したものとして上の�
   expect(lines.some(line => line.includes('#1'))).toBe(false)
   expect(lines[8]).toMatch(/#2 Explore/)
   expect(lines.at(-1)).toBe('ほか 1 体を省いた')
+})
+
+test('前の依頼で起動して、新しい依頼のあとに終えたものは残し、結果の粒を見せる', () => {
+  const since = T0 + 5000
+  const end = T0 + 8000
+  const agents = { 'agent-1': agent(1, { status: 'ok', durationMs: 8000, startedAt: T0, endedAt: end }) }
+  const lines = layoutMap([], agents, '', end + 100, 30, 40, { since })
+
+  expect(draw(lines).some(line => line.includes('#1 Explore'))).toBe(true)
+  expect(draw(lines).some(line => line.includes('◆'))).toBe(true)
+})
+
+test('前の依頼で起動して実行中のまま、長く動きの無いものは外す(終わりの知らせが来なかったもの)', () => {
+  const since = T0 + 1000
+  const agents = { 'agent-1': agent(1, { startedAt: T0 }) }
+  const list = [entry('a1', '「TODO」を検索', T0 + 500, { agentId: 'agent-1', status: 'running' })]
+  const nos = (now: number) => buildScene(list, agents, since, now).items.map(item => item.id)
+
+  expect(nos(T0 + 500 + STALE_MS - 1)).toEqual(['agent-1'])
+  expect(nos(T0 + 500 + STALE_MS)).toEqual([])
+  // 今の依頼で起動したものは、長く動きが無くても残す
+  expect(buildScene(list, agents, T0, T0 + STALE_MS * 2).items).toHaveLength(1)
+})
+
+test('新しい依頼を受けたら、作業の行がまだ無くても、メインは前のターンの終わりではなく考えているにする', () => {
+  const finished = [entry('turn:t1', '回答した(2秒)', T0 + 1000, { kind: 'turn', status: 'ok' })]
+  expect(still(draw(layoutMap(finished, {}, '', T0 + 3000, 30, 40)))[1]).toMatch(/│ ✓ 回答した\(2秒\)/)
+  expect(still(draw(layoutMap(finished, {}, '', T0 + 3000, 30, 40, { since: T0 + 2000 })))[1]).toMatch(/│ … 考えています/)
+  expect(mainMood(buildScene(finished, {}, T0 + 2000, T0 + 3000), T0 + 3000)).toBe('thinking')
 })

@@ -3,6 +3,7 @@ import type { On } from 'claude-code'
 
 import type { WorkLogEntry } from '../types'
 import { describeTool, describeTurnEnd, isNewRequest, resolveSummaryModel, shortModel } from './describe'
+import { BLINK_EVERY } from './clawd'
 import { TICK_MS } from './map'
 
 const CWD = '/work/app'
@@ -448,8 +449,8 @@ test('ペインのタブで一覧・ツリー・マップを切り替え、今�
       expect(await ui.find({ text: /╭─ ◉ メイン ─+ opus-5-5 ─╮/ })).toBeDefined()
     }
     // 子は組織図の箱。番号と種類は押せるボタンで、#1 は終えて ✓ と所要時間、#2 は実行中
-    expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', text: '#2 Explore' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#2' })).toBeDefined()
     expect(await ui.find({ text: /│ ✓ 12秒 +│ │ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 0秒 +│/ })).toBeDefined()
 
     // マップから一覧へ直接戻れる
@@ -479,9 +480,10 @@ const watchMap = (on: On) => {
     value: [{ id: 'cc-work-log', title: '作業ログ', isShown: true, isFocused: false, isPlaced: true }],
   }))
   const redraws = { count: 0 }
-  on('ui.invalidate', () => {
+  // 数えたうえで先へ渡し、マウントしたペインを描き直させる(描き直しを止めるかは描く側が決めるため)
+  on('ui.invalidate', ($, e, next) => {
     redraws.count += 1
-    return { value: undefined } as never
+    return next(e)
   })
   return redraws
 }
@@ -503,8 +505,8 @@ test('マップでは、組織図のようにサブエージェント2つの箱�
     expect(await ui.find({ text: surface === 'terminal' ? /^╭─ メイン/ : /^╭─ ◉ メイン/ })).toBeDefined()
     // サブエージェントはドット絵にせず、文字の枝で描く。Raster はメインのキャラの1つだけ
     expect(await ui.findAll({ type: 'Raster' })).toHaveLength(surface === 'terminal' ? 1 : 0)
-    expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', text: '#2 Explore' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '#2' })).toBeDefined()
     // 起動したての依頼の粒が、まだ道筋の上にいる
     expect(await ui.find({ text: /●/ })).toBeDefined()
     expect(await currentTab(ui)).toBe('マップ')
@@ -518,6 +520,9 @@ test('マップは動いているあいだだけ描き直し、何も動いて�
   const redraws = watchMap(on)
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'agent-1' }))
   await start($)
+
+  // 続けるか止めるかは描く側が決めるので、ペインを出しておく(まばたきの描き直しが混ざらないよう、デスクトップで)
+  const ui = await mountPane($, 'desktop')
 
   // 実行中のサブエージェントがいるあいだは、TICK_MS ごとに描き直す
   await spawnExplore($)
@@ -533,7 +538,6 @@ test('マップは動いているあいだだけ描き直し、何も動いて�
   expect(settled).toBeLessThan((1500 + 5000) / TICK_MS)
 
   // 一覧に切り替えていれば、動きがあっても描き直さない
-  const ui = await mountPane($, 'terminal')
   await ui.press({ key: 'view:list' })
   expect(await currentTab(ui)).toBe('一覧')
   const listed = redraws.count
@@ -594,7 +598,7 @@ test('マップの箱を押すと、そのサブエージェントのモデル�
 
   await ui.press({ key: 'close-detail' })
   expect(state.selected).toBe(null)
-  expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -616,7 +620,7 @@ test('新しい依頼を受けると、マップはその依頼のぶんに切�
   await $.prompt.submit({ text: '次はこれをして' })
   expect(typeof state.requestAt).toBe('number')
   expect(state.selected).toBe(null)
-  expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: '#1' })).toBeUndefined()
   expect(await ui.find({ text: /サブエージェントはいません/ })).toBeDefined()
   await ui.unmount()
 })
@@ -657,7 +661,7 @@ test('詳細を開いていてもタブで切り替えられ、切り替える�
   expect(await currentTab(ui)).toBe('一覧')
   expect(state.selected).toBe(null)
   await ui.press({ key: 'view:map' })
-  expect(await ui.find({ type: 'Button', text: '#1 Explore' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '#1' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -670,5 +674,21 @@ test('幅の足りないペインでは、マップの代わりにそう出す',
 
   const ui = await mountPane($, 'terminal', 20)
   expect(await ui.find({ text: /マップは幅 24 マス以上で出します/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('ターミナルでは、何も動いていないときも、キャラのまばたきの瞬間だけ描き直す', { options: { view: 'map' } }, async ($, on) => {
+  const clock = answerBasics(on)
+  answerTools(on)
+  const redraws = watchMap(on)
+  await start($)
+  await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
+  await endTurn($)
+
+  const ui = await mountPane($, 'terminal')
+  const before = redraws.count
+  // まばたきの周期(BLINK_EVERY)の2周ぶんで、始まりと終わりの2回ずつ
+  await clock.advance(BLINK_EVERY * 2)
+  expect(redraws.count - before).toBe(4)
   await ui.unmount()
 })

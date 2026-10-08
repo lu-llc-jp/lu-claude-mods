@@ -18,14 +18,14 @@ import {
   shortModel,
   summaryPrompt,
 } from './describe'
-import { CLAWD_COLUMNS, clawdFrame } from './clawd'
+import { BLINK_EVERY, BLINK_FOR, CLAWD_COLUMNS, clawdFrame } from './clawd'
 import {
   MAP_MIN_WIDTH,
   TICK_MS,
   buildScene,
+  fit,
   formatTokens,
   hueOf,
-  isMapAnimating,
   isSceneAnimating,
   layoutMap,
   mainMood,
@@ -49,6 +49,7 @@ const summaryStop = atom(
 const viewAtom = atom({ plugin: 'cc-work-log', key: 'view' } as const, null as WorkLogView | null)
 const requestAtom = atom({ plugin: 'cc-work-log', key: 'requestAt' } as const, null as number | null)
 const selectedAtom = atom({ plugin: 'cc-work-log', key: 'selected' } as const, null as string | null)
+const pendingAtom = atom({ plugin: 'cc-work-log', key: 'requestPending' } as const, false)
 
 const push = async ($: EngineInterface, entry: Omit<WorkLogEntry, 'at'>): Promise<void> => {
   const at = await $.clock.now()
@@ -78,6 +79,13 @@ const stopTicker = (): void => {
   ticker = undefined
 }
 
+// 止まっているあいだも、キャラのまばたきの瞬間だけ描き直すタイマー
+let blinker: Timer | undefined
+
+/**
+ * 描き直しのタイマーの1回ぶん。マップが見えていれば描き直しを頼むだけにする。
+ * 続けるか止めるかは、描く側(場面を組み立てたところ)で決める
+ */
 const tick = async ($: EngineInterface, configView: WorkLogView): Promise<void> => {
   const view = (await read($, viewAtom)) ?? configView
   const shown = view === 'map' && (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
@@ -85,12 +93,29 @@ const tick = async ($: EngineInterface, configView: WorkLogView): Promise<void> 
     stopTicker()
     return
   }
-  // 止めるときも1回描き直し、最後の様子(粒が届いた・点が ✓ になった)を残す
   $.ui.invalidate('ui.render')
-  if (!isMapAnimating(await read($, entries), await read($, agents), await $.clock.now(), await read($, requestAtom))) {
-    stopTicker()
-  }
 }
+
+/** 動きが無いときに、次のまばたきの始まりと終わりに1回ずつ描き直す。描き直した先でまた次を頼むので、見えているあいだ続く */
+const scheduleBlink = ($: EngineInterface, now: number): void => {
+  if (blinker !== undefined) return
+  blinker = $.clock.after(BLINK_EVERY - (now % BLINK_EVERY), () => {
+    blinker = undefined
+    $.ui.invalidate('ui.render')
+    void $.clock.after(BLINK_FOR, () => $.ui.invalidate('ui.render'))
+  })
+}
+
+/** 新しい依頼の区切りを付ける。マップをその依頼のぶんに切り替え、開いていた詳細を閉じる */
+const startRequest = async ($: EngineInterface): Promise<void> => {
+  const at = await $.clock.now()
+  await update($, requestAtom, () => at)
+  await update($, selectedAtom, () => null)
+}
+
+// メインのモデルは /model で変わるので描くたびに聞くが、1秒に何度も描き直すあいだは少しだけ覚えておく
+let modelCache: { value: string; at: number } | undefined
+const MODEL_CACHE_MS = 2000
 
 /** 何かが動き出したときに呼ぶ。マップを見ているときだけタイマーを立てる(ペインが隠れていれば、次の1回で止まる) */
 const animate = ($: EngineInterface, configView: WorkLogView): void => {
@@ -177,9 +202,13 @@ export const register: Register = (on, options) => {
     try {
       // 出どころの無い入力(古いエンジンや、テストの $.prompt.submit)は、新しい依頼として扱う
       if (isNewRequest((e.origin as { kind?: string } | undefined)?.kind ?? 'composer')) {
-        const at = await $.clock.now()
-        await update($, requestAtom, () => at)
-        await update($, selectedAtom, () => null)
+        if (e.turnId === undefined) {
+          await startRequest($)
+        } else {
+          // 実行中のターンのあいだに打たれた入力は、そのターンが終わってから次の依頼として区切る
+          // (今のターンで終えたサブエージェントを、ターンの途中で消さないため)
+          await update($, pendingAtom, () => true)
+        }
       }
     } catch {
       // 区切りが付けられなくても入力は止めない
@@ -309,6 +338,10 @@ export const register: Register = (on, options) => {
         })
         animate($, configView)
       }
+      if (e.agentId === undefined && (await read($, pendingAtom))) {
+        await update($, pendingAtom, () => false)
+        await startRequest($)
+      }
       if (e.agentId === undefined && summaryModel !== undefined) {
         // ターンの終わりを待たせないよう、要約は後ろで行う。いま足したターン終了の行より前が、このターンの作業
         const model = summaryModel
@@ -332,8 +365,11 @@ export const register: Register = (on, options) => {
     const list = await read($, entries)
     const known = await read($, agents)
     const view = (await read($, viewAtom)) ?? configView
-    // メインのモデルは /model で変わるので、描くたびに聞く
-    const mainModel = await $.session.model().catch(() => '')
+    const drawnAt = await $.clock.now()
+    if (modelCache === undefined || drawnAt - modelCache.at >= MODEL_CACHE_MS) {
+      modelCache = { value: await $.session.model().catch(() => ''), at: drawnAt }
+    }
+    const mainModel = modelCache.value
     const width = Math.max(10, e.props.bodyColumns)
     // 見出しの1行を除いた行数。最新の行が見えるよう、入るぶんだけ後ろから出す
     const room = Math.max(1, e.props.scroll.bodyRows - 1)
@@ -394,9 +430,14 @@ export const register: Register = (on, options) => {
       const selected = await read($, selectedAtom)
       const chosen = selected === null ? undefined : known[selected]
       // 場面は描くたびに1回だけ組み立て、配置とキャラの様子で使い回す
-      const scene = buildScene(list, known, since)
-      // ペインを隠して出し直したときなど、タイマーが止まっていても動きがあれば立て直す
-      if (isSceneAnimating(scene, now)) animate($, configView)
+      const scene = buildScene(list, known, since, now)
+      // 動きがあればタイマーを立てる(ペインを隠して出し直したときも、ここで立て直る)。止まったら止め、キャラのまばたきだけ続ける
+      if (isSceneAnimating(scene, now)) {
+        animate($, configView)
+      } else {
+        stopTicker()
+        if (e.surface === 'terminal') scheduleBlink($, now)
+      }
       if (width < MAP_MIN_WIDTH) {
         return (
           <Box flexDirection="column" width={width}>
@@ -413,6 +454,9 @@ export const register: Register = (on, options) => {
 
       // 箱を押したら、そのサブエージェントが何をしたかを出す
       if (selected !== null && typeof chosen === 'object' && chosen !== null) {
+        // 結果は3行ぶんまでにし、残りの高さをしたことの一覧に回す(長い結果で一覧が押し出されないように)
+        const answer = chosen.answer === undefined ? undefined : fit(chosen.answer, Math.max(10, width * 3 - 6))
+        const listRows = Math.max(1, room - 5 - (answer === undefined ? 0 : 3))
         // 状態を持たない古い記録も、マップと同じ判定(ターン終了の行があれば終えた)にそろえる
         const status = agentStatus(chosen, selected, list)
         const done = status !== 'running'
@@ -440,21 +484,21 @@ export const register: Register = (on, options) => {
               </Text>
               <Text dimColor> · {facts.join(' · ')}</Text>
             </Text>
-            <Text wrap="wrap">
+            <Text wrap="truncate">
               <Text dimColor>頼まれたこと: </Text>
               {chosen.name}
             </Text>
             <Text dimColor>したこと({work.length} 件)</Text>
-            {work.slice(-Math.max(1, room - 7)).map(one => (
+            {work.slice(-listRows).map(one => (
               <Text key={one.id} wrap="truncate">
                 <Text dimColor>{formatTime(one.at)} </Text>
                 <Text color={MARK_COLOR[one.status ?? 'running']}>{MARK[one.status ?? 'running']}</Text> {one.text}
               </Text>
             ))}
-            {chosen.answer === undefined ? null : (
+            {answer === undefined ? null : (
               <Text wrap="wrap">
                 <Text dimColor>結果: </Text>
-                {chosen.answer}
+                {answer}
               </Text>
             )}
           </Box>

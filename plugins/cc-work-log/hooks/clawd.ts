@@ -22,7 +22,11 @@ const BODY_ART = [
 /** 足(4本)。歩くときは2本ずつ上げ下げする */
 const LEGS = [4, 6, 11, 13]
 
-const blinking = (now: number): boolean => now % 2600 < 160
+/** まばたきの周期と、目を閉じている時間(ms)。何も動いていないときも、描く側はこの周期で描き直してまばたきさせる */
+export const BLINK_EVERY = 2600
+export const BLINK_FOR = 160
+
+const blinking = (now: number): boolean => now % BLINK_EVERY < BLINK_FOR
 
 /** メインの様子と時刻から、キャラの1コマを作る */
 export const clawdFrame = (mood: MainMood, now: number): RasterCells => {

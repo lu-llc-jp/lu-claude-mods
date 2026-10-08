@@ -66,6 +66,8 @@ declare module 'claude-code' {
       requestAt: number | null
       /** マップで詳細を開いているサブエージェントの id。開いていなければ null */
       selected: string | null
+      /** 実行中のターンのあいだに新しい依頼が打たれ、そのターンが終わったら区切るのを待っているか */
+      requestPending: boolean
     }
   }
 }

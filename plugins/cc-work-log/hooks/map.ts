@@ -1,4 +1,5 @@
 import type { WorkLogAgent, WorkLogEntry, WorkLogStatus } from '../types'
+import { CLAWD_ROWS } from './clawd'
 import { seconds, shortModel } from './describe'
 import { agentOf, agentStatus, splitTurns } from './tree'
 
@@ -23,8 +24,10 @@ const NODE_ROWS = 5
 const LINK_ROWS = 2
 /** 流れる光の間隔(マス) */
 const PULSE_GAP = 4
-/** キャラを入れたメインのカードの中の行数。キャラの Raster の高さ(clawd.ts の CLAWD_ROWS)と同じにする */
-const HUB_AVATAR_ROWS = 4
+/** キャラを入れたメインのカードの中の行数。キャラの Raster の高さに合わせる */
+const HUB_AVATAR_ROWS = CLAWD_ROWS
+/** 前の依頼で起動して実行中のまま、これだけ動きが無いものは、終わりの知らせが来なかったものとしてマップから外す(ms) */
+export const STALE_MS = 10 * 60_000
 
 /**
  * マップの1区切りの色分け。
@@ -168,6 +171,7 @@ export const buildScene = (
   list: readonly WorkLogEntry[],
   agents: Record<string, WorkLogAgent>,
   since: number | null,
+  now: number,
 ): Scene => {
   const last = splitTurns(list).at(-1)
   const spawnIds = new Set<string>()
@@ -185,8 +189,15 @@ export const buildScene = (
     const startedAt = agent.startedAt ?? list.find(one => one.id === agent.spawnEntryId)?.at
     const endedAt =
       agent.endedAt ?? (status === 'running' ? undefined : list.find(one => one.kind === 'turn' && one.agentId === id)?.at)
-    // 前の依頼で起動して終えたものは置かない。完了の通知でターンが進んでも、次の依頼までは残る
-    if (status !== 'running' && since !== null && !(startedAt !== undefined && startedAt >= since)) continue
+    const earlier = since !== null && !(startedAt !== undefined && startedAt >= since)
+    // 前の依頼で起動して、その依頼のうちに終えたものは置かない。完了の通知でターンが進んでも、次の依頼までは残る。
+    // 前の依頼で起動して、新しい依頼のあとに終えたものは残す(結果の粒が戻るところを見せる)
+    if (status !== 'running' && earlier && !(endedAt !== undefined && since !== null && endedAt >= since)) continue
+    // 前の依頼で起動して実行中のまま、長く動きの無いものは、終わりの知らせが来なかった(セッションが落ちたなど)として外す
+    if (status === 'running' && earlier) {
+      const lastSeen = list.reduce((at, one) => (one.agentId === id ? Math.max(at, one.at) : at), startedAt ?? 0)
+      if (now - lastSeen >= STALE_MS) continue
+    }
     items.set(id, {
       id,
       agent,
@@ -198,7 +209,8 @@ export const buildScene = (
     })
   }
 
-  const end = last?.end
+  // 新しい依頼を受けたあと、まだ作業の行が無ければ、前のターンの終わりではなく「考えている」と出す
+  const end = last?.end !== undefined && since !== null && since > last.end.at ? undefined : last?.end
   return {
     main: {
       status: end === undefined ? 'running' : (end.status ?? 'ok'),
@@ -241,12 +253,6 @@ export const isSceneAnimating = (scene: Scene, now: number): boolean =>
   flashing(scene.items, now) ||
   scene.items.some(item => item.status === 'running' || inFlight(item.startedAt, now) || inFlight(item.endedAt, now))
 
-export const isMapAnimating = (
-  list: readonly WorkLogEntry[],
-  agents: Record<string, WorkLogAgent>,
-  now: number,
-  since: number | null = null,
-): boolean => isSceneAnimating(buildScene(list, agents, since), now)
 
 // ---- 描く ----
 
@@ -342,6 +348,7 @@ const hubRows = (
           ]
         : [{ text: '… 考えています', tone: 'note' }]
 
+  // 数とトークンは、この依頼のサブエージェントすべてで数える(幅や高さが足りずに省いた箱のぶんも含む)
   const live = items.filter(item => item.status === 'running').length
   const ok = items.filter(item => item.status === 'ok').length
   const ng = items.filter(item => item.status === 'error').length
@@ -367,13 +374,14 @@ const hubRows = (
   return [top, ...inside.map((segs, i) => body(`hub:in:${i}`, segs)), bottom]
 }
 
-/** 箱の1行目: 番号と種類。押すとそのエージェントの詳細を開く */
+/** 箱の1行目: 番号と種類。番号は押せて、押すとそのエージェントの詳細を開く(種類は色を付けるため、ボタンにしない) */
 const titleSegs = (item: Item, room: number): MapSeg[] => {
   const { agent } = item
-  const no = `#${agent.no} `
+  const no = `#${agent.no}`
   return [
     { text: no, tone: 'no', press: item.id },
-    { text: fit(shortType(agent.type), room - cellWidth(no)), tone: 'type', hue: hueOf(agent.type), press: item.id },
+    { text: ' ', tone: 'edge' },
+    { text: fit(shortType(agent.type), room - cellWidth(no) - 1), tone: 'type', hue: hueOf(agent.type) },
   ]
 }
 
@@ -452,7 +460,7 @@ export const layoutMap = (
   columns: number,
   { avatar = 0, since = null, scene: given }: { avatar?: number; since?: number | null; scene?: Scene } = {},
 ): MapLine[] => {
-  const scene = given ?? buildScene(list, agents, since)
+  const scene = given ?? buildScene(list, agents, since, now)
   const hubHeight = avatar > 0 ? 2 + HUB_AVATAR_ROWS : 5
   const width = Math.max(MAP_MIN_WIDTH, Math.min(columns, HUB_MAX))
   let kept = scene.items.map(item => item.id)
