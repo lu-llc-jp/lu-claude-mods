@@ -13,15 +13,17 @@ export const FLASH_MS = 900
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 /** マップを描ける幅の下限。これより狭いペインでは、描く側が「幅が足りない」と出す */
 export const MAP_MIN_WIDTH = 24
-/** マップの幅の上限。広いペインでも線が間延びしないように止める */
-const HUB_MAX = 72
-/** 箱の幅の下限と上限(マス)。箱を横に並べて入らなければ、下限まで縮めてから省く */
+/** マップの幅の上限。広いペインでは箱を横に多く並べ、それより広くても線が間延びしないように止める */
+const MAP_MAX = 120
+/** 箱の幅の下限と上限(マス)。箱を横に並べて入らなければ、下限まで縮めて折り返す */
 const NODE_MIN = 14
 const NODE_MAX = 24
 /** 箱の高さ(上下の枠 + 中身3行) */
 const NODE_ROWS = 5
 /** 親の箱の下から子の箱の上までの行数(横に分ける行 + 下ろす行) */
 const LINK_ROWS = 2
+/** 折り返すときに左端に空ける列(下ろす線 + 箱とのあいだ)。折り返さないときは空けない */
+const GUTTER = 2
 /** 流れる光の間隔(マス) */
 const PULSE_GAP = 4
 /** キャラを入れたメインのカードの中の行数。キャラの Raster の高さに合わせる */
@@ -444,16 +446,194 @@ const junction = (up: boolean, down: boolean, left: boolean, right: boolean): st
   return table[key] ?? ' '
 }
 
-type Node = { item: Item; children: Node[]; x: number; width: number; center: number }
+type Node = { item: Item; children: Node[] }
+/** 置いた箱。x・y は箱の左上。parent: 子を持つ(下の枠に付け根 ┬ を付ける) */
+type Box = { item: Item; x: number; y: number; parent: boolean }
+/**
+ * 塊。箱1つと、その下に並ぶ子孫を、塊の左上を原点にして持つ。
+ * id・center は一番上の箱のエージェントと、その真ん中の列(親からの線が下りてくるところ)
+ */
+type Block = { id: string; width: number; height: number; center: number; boxes: Box[]; paths: Map<string, Path> }
+/** 同じ親の子の並び。rows は行ごとの上の端(横に分ける行)と、そこに置く塊とその左の列。mid は1行目の子の真ん中 */
+type Group = { width: number; height: number; mid: number; rows: Array<{ y: number; cells: Array<{ block: Block; x: number }> }> }
+
+/** 角を順に縦か横に結び、通るマスを並べる */
+const route = (...corners: Array<[number, number]>): Path => {
+  const path: Path = []
+  for (const [r, c] of corners) {
+    const prev = path.at(-1)
+    if (prev === undefined) {
+      path.push([r, c])
+      continue
+    }
+    let [pr, pc] = prev
+    while (pr !== r || pc !== c) {
+      pr += Math.sign(r - pr)
+      pc += Math.sign(c - pc)
+      path.push([pr, pc])
+    }
+  }
+  return path
+}
+
+/** 塊を横に並べたときの幅(あいだに1列ずつ空ける) */
+const across = (blocks: readonly Block[]): number => blocks.reduce((sum, block) => sum + block.width + 1, 0) - 1
+
+/** node とその子孫を、幅 room に収まる塊にする。収まらなければ undefined */
+const blockOf = (node: Node, room: number, w: number): Block | undefined => {
+  const box = (x: number): Box => ({ item: node.item, x, y: 0, parent: node.children.length > 0 })
+  if (node.children.length === 0) {
+    return { id: node.item.id, width: w, height: NODE_ROWS, center: Math.floor(w / 2), boxes: [box(0)], paths: new Map() }
+  }
+  const group = groupOf(node.children, room, w)
+  if (group === undefined) return undefined
+  const width = Math.max(w, group.width)
+  const gx = Math.floor((width - group.width) / 2)
+  // 親の箱は、1行目の子の並びの真ん中に置く
+  const x = Math.max(0, Math.min(width - w, gx + group.mid - Math.floor(w / 2)))
+  const center = x + Math.floor(w / 2)
+  const joined = join(group, center - gx)
+  return {
+    id: node.item.id,
+    width,
+    height: NODE_ROWS + group.height,
+    center,
+    boxes: [box(x), ...joined.boxes.map(one => ({ ...one, x: one.x + gx, y: one.y + NODE_ROWS }))],
+    paths: new Map([...joined.paths].map(([id, path]) => [id, path.map(([r, c]): [number, number] => [r + NODE_ROWS, c + gx])])),
+  }
+}
+
+/**
+ * 同じ親の子を、幅 room に並べる。1行に入れば1行に並べる。
+ * 入らなければ左端に線のための列(GUTTER)を空けて折り返す。子を持つ箱は1行目に置き、折り返すのは子を持たない箱だけ
+ */
+const groupOf = (children: readonly Node[], room: number, w: number): Group | undefined => {
+  const rowsOf = (lines: ReadonlyArray<readonly Block[]>, left: number): Group => {
+    const rows: Group['rows'] = []
+    let y = 0
+    for (const blocks of lines) {
+      let x = left
+      rows.push({ y, cells: blocks.map(block => ({ block, x: (x += block.width + 1) - block.width - 1 })) })
+      y += LINK_ROWS + Math.max(...blocks.map(block => block.height))
+    }
+    const first = rows[0]?.cells ?? []
+    const head = first[0]
+    const tail = first.at(-1)
+    return {
+      width: left + Math.max(...lines.map(across)),
+      height: y,
+      mid: head === undefined || tail === undefined ? 0 : Math.floor((head.x + head.block.center + tail.x + tail.block.center) / 2),
+      rows,
+    }
+  }
+  const flat = children.map(child => blockOf(child, room, w))
+  if (flat.every(block => block !== undefined) && across(flat) <= room) return rowsOf([flat], 0)
+
+  const inner = room - GUTTER
+  if (inner < w) return undefined
+  const nests = children.filter(child => child.children.length > 0)
+  // 子を持つ箱がそろって1行目に入らなければ、幅を等分して、その子の並びも折り返させる
+  let big = nests.map(child => blockOf(child, inner, w))
+  if (!big.every(block => block !== undefined) || across(big) > inner) {
+    big = nests.map(child => blockOf(child, Math.floor((inner + 1) / nests.length) - 1, w))
+  }
+  if (!big.every(block => block !== undefined) || across(big) > inner) return undefined
+  const blocks = new Map(nests.map((child, i) => [child, big[i] as Block]))
+  // 1行目には、子を持つ箱と、残りの幅に入るだけの子を持たない箱を、起動した順に置く。残りは1行に入るだけずつ折り返す
+  let used = across(big)
+  const first: Node[] = []
+  const rest: Node[] = []
+  for (const child of children) {
+    if (blocks.has(child)) first.push(child)
+    else if (rest.length === 0 && used + 1 + w <= inner) {
+      first.push(child)
+      used += w + 1
+    } else rest.push(child)
+  }
+  const leaf = (child: Node): Block => blocks.get(child) ?? (blockOf(child, inner, w) as Block)
+  const lines: Block[][] = [first.map(leaf)]
+  const perRow = Math.floor((inner + 1) / (w + 1))
+  for (let i = 0; i < rest.length; i += perRow) lines.push(rest.slice(i, i + perRow).map(leaf))
+  return rowsOf(lines, GUTTER)
+}
+
+/**
+ * 子の並びに線をつなぐ。from は親から線が下りてくる列。
+ * 1行目へは、親の下から横に分けて子の箱の上へ下ろす。2行目より下へは、上の行の箱を突き抜けないよう、
+ * 左端の列まで横に出てから下ろし、その行の上で横に分けて下ろす
+ */
+const join = (group: Group, from: number): Pick<Block, 'boxes' | 'paths'> => {
+  const boxes: Box[] = []
+  const paths = new Map<string, Path>()
+  group.rows.forEach(({ y, cells }, i) => {
+    const top = y + LINK_ROWS
+    for (const { block, x } of cells) {
+      const c = x + block.center
+      paths.set(block.id, i === 0 ? route([0, from], [0, c], [top, c]) : route([0, from], [0, 0], [y, 0], [y, c], [top, c]))
+      boxes.push(...block.boxes.map(one => ({ ...one, x: one.x + x, y: one.y + top })))
+      for (const [id, path] of block.paths) paths.set(id, path.map(([r, cc]): [number, number] => [r + top, cc + x]))
+    }
+  })
+  return { boxes, paths }
+}
+
+/** 置くもの(親子をたどる順)を木にする */
+const treeOf = (items: readonly Item[]): Node[] => {
+  const nodes = new Map(items.map(item => [item.id, { item, children: [] } as Node]))
+  const roots: Node[] = []
+  for (const item of items) {
+    const node = nodes.get(item.id)
+    if (node === undefined) continue
+    const parentNode = item.parent === undefined ? undefined : nodes.get(item.parent)
+    if (parentNode === undefined) roots.push(node)
+    else parentNode.children.push(node)
+  }
+  return roots
+}
+
+/** 葉(子の無い箱)の数。1行に並べるなら、横に並ぶ箱の数になる */
+const leaves = (items: readonly Item[]): number => {
+  const parents = new Set(items.flatMap(item => item.parent ?? []))
+  return items.filter(item => !parents.has(item.id)).length
+}
+
+/**
+ * 箱の幅を決め、メインの下に子を並べる。1行に入るなら、葉を横に並べて入る幅にする。
+ * 入らなければ折り返す。幅は、左端の線の列を除いた幅に、いちばん細い箱が入るだけ並べて決める
+ */
+const planMap = (items: readonly Item[], width: number, rootCenter: number) => {
+  const count = leaves(items)
+  const clamp = (n: number) => Math.max(NODE_MIN, Math.min(NODE_MAX, n))
+  const perRow = Math.max(1, Math.floor((width - GUTTER + 1) / (NODE_MIN + 1)))
+  const w =
+    count * (NODE_MIN + 1) - 1 <= width
+      ? clamp(Math.floor((width + 1) / Math.max(1, count)) - 1)
+      : clamp(Math.floor((width - GUTTER + 1) / perRow) - 1)
+  const roots = treeOf(items)
+  if (roots.length === 0) return { width: w, height: 0, roots: 0, boxes: [], paths: new Map<string, Path>() }
+  const group = groupOf(roots, width, w)
+  if (group === undefined) return undefined
+  // 子の並びは、メインの付け根(カードの真ん中)を中心に置く
+  const gx = Math.max(0, Math.min(width - group.width, rootCenter - Math.floor(group.width / 2)))
+  const { boxes, paths } = join(group, rootCenter - gx)
+  return {
+    width: w,
+    height: group.height,
+    roots: roots.length,
+    boxes: boxes.map(one => ({ ...one, x: one.x + gx })),
+    paths: new Map([...paths].map(([id, path]) => [id, path.map(([r, c]): [number, number] => [r, c + gx])])),
+  }
+}
 
 /**
  * マップの行を組み立てる。組織図のように、メインのカードを上に置き、その下に子のエージェントを箱にして横に並べる。
  * サブエージェントが起動したものは、親の箱の下に同じように並べる。箱は起動した順に左から置く。
  * 親から子へは、親の下から線を下ろして横に分け、子の箱の上へ下ろす。
+ * 同じ親の子が横に入りきらなければ、次の行に折り返す。折り返した行へは、左端に下ろした線から分けてつなぐ。
  * 実行中の線には光が流れ、起動したては依頼の粒が親から子へ、終えたては結果の粒が子から親へ流れる。
  * 箱には、番号と種類(押すと詳細を開く)・モデル・様子と時間を出し、下の枠に消費トークンを載せる。
  * 置くのは、直近の依頼(since)より後に起動したものと、まだ実行中のもの。
- * 横か縦に入りきらなければ、終えたもの(古い順)、新しいもの、の順に省く。
+ * 折り返しても入りきらなければ、終えたもの(古い順)、新しいもの、の順に省く。
  * 先頭の行(key が hub: で始まる)がメインのカード。avatar > 0 なら、カードの中の左に avatar 列のキャラの隙間を空け、
  * 中の行(key が hub:in: で始まる)の left・right に隙間の左右を分けて持たせる
  */
@@ -468,22 +648,17 @@ export const layoutMap = (
 ): MapLine[] => {
   const scene = given ?? buildScene(list, agents, since, now)
   const hubHeight = avatar > 0 ? 2 + HUB_AVATAR_ROWS : 5
-  const width = Math.max(MAP_MIN_WIDTH, Math.min(columns, HUB_MAX))
+  const width = Math.max(MAP_MIN_WIDTH, Math.min(columns, MAP_MAX))
+  // メインの付け根は、カードの真ん中
+  const rootCenter = Math.floor(width / 2)
   let kept = scene.items.map(item => item.id)
   let omitted = 0
 
   // 省いたものを除いて並べ直す(親を省いた子は、メインから起動したものとして上の段に上がる)
   const placed = (): Item[] => arrange(scene.items.filter(item => kept.includes(item.id)), agents)
-  /** 葉(子の無い箱)の数。横に並ぶ箱の数の最大になる */
-  const leaves = (items: readonly Item[]): number => {
-    const parents = new Set(items.flatMap(item => item.parent ?? []))
-    return items.filter(item => !parents.has(item.id)).length
-  }
   const fits = (): boolean => {
-    const items = placed()
-    const levels = items.reduce((max, item) => Math.max(max, item.depth + 1), 0)
-    const height = hubHeight + levels * (LINK_ROWS + NODE_ROWS) + (omitted > 0 ? 1 : 0)
-    return height <= rows && leaves(items) * (NODE_MIN + 1) - 1 <= width
+    const plan = planMap(placed(), width, rootCenter)
+    return plan !== undefined && hubHeight + plan.height + (omitted > 0 ? 1 : 0) <= rows
   }
   const byNo = (id: string) => agentOf(agents, id)?.no ?? 0
   const statusOf = (id: string) => scene.items.find(item => item.id === id)?.status
@@ -498,89 +673,63 @@ export const layoutMap = (
   while (!fits() && drop(ids => [...ids].sort((a, b) => byNo(b) - byNo(a))[0]));
 
   const items = placed()
-  // 箱の幅は、葉を横に並べて入る幅にする
-  const nodeWidth = Math.max(NODE_MIN, Math.min(NODE_MAX, Math.floor((width + 1) / Math.max(1, leaves(items))) - 1))
+  const plan = planMap(items, width, rootCenter) ?? { width: NODE_MIN, height: 0, roots: 0, boxes: [], paths: new Map<string, Path>() }
+  const nodeWidth = plan.width
+  // 道筋は、メインのカードの下の行から数える
+  const paths = new Map([...plan.paths].map(([id, path]) => [id, path.map(([r, c]): [number, number] => [r + hubHeight, c])]))
 
-  // 木を作り、左から順に場所を決める(親は子の並びの真ん中に置く)
-  const nodes = new Map<string, Node>()
-  for (const item of items) nodes.set(item.id, { item, children: [], x: 0, width: nodeWidth, center: 0 })
-  const roots: Node[] = []
-  for (const item of items) {
-    const node = nodes.get(item.id)
-    if (node === undefined) continue
-    const parentNode = item.parent === undefined ? undefined : nodes.get(item.parent)
-    if (parentNode === undefined) roots.push(node)
-    else parentNode.children.push(node)
-  }
-  const span = (node: Node): number =>
-    node.children.length === 0
-      ? nodeWidth
-      : Math.max(nodeWidth, node.children.reduce((sum, child) => sum + span(child), 0) + node.children.length - 1)
-  const place = (node: Node, left: number) => {
-    const total = span(node)
-    let x = left + Math.floor((total - (node.children.reduce((sum, child) => sum + span(child), 0) + Math.max(0, node.children.length - 1))) / 2)
-    for (const child of node.children) {
-      place(child, x)
-      x += span(child) + 1
-    }
-    const first = node.children[0]
-    const last = node.children.at(-1)
-    node.center =
-      first === undefined || last === undefined ? left + Math.floor(total / 2) : Math.floor((first.center + last.center) / 2)
-    node.x = Math.max(0, Math.min(width - nodeWidth, node.center - Math.floor(nodeWidth / 2)))
-    node.center = node.x + Math.floor(nodeWidth / 2)
-  }
-  const forest = roots.reduce((sum, root) => sum + span(root), 0) + Math.max(0, roots.length - 1)
-  // メインの付け根は、カードの真ん中。子の並びもそこを中心に置く
-  const rootCenter = Math.floor(width / 2)
-  let x = Math.max(0, Math.min(width - forest, rootCenter - Math.floor(forest / 2)))
-  for (const root of roots) {
-    place(root, x)
-    x += span(root) + 1
-  }
-
-  const out: Row[] = hubRows(scene, mainModel, width, now, roots.length > 0 ? rootCenter : undefined, avatar)
+  const out: Row[] = hubRows(scene, mainModel, width, now, plan.roots > 0 ? rootCenter : undefined, avatar)
   const rowAt = (r: number): Row => {
     while (out.length <= r) out.push({ key: `row:${out.length}`, cells: [] })
     return out[r] as Row
   }
 
-  // 親(メインなら幹)の下から子の箱の上までの線を引き、道筋を覚える
-  const paths = new Map<string, Path>()
-  const link = (fromCol: number, busRow: number, children: readonly Node[]) => {
-    const cols = [fromCol, ...children.map(child => child.center)]
-    const min = Math.min(...cols)
-    const max = Math.max(...cols)
-    const row = rowAt(busRow)
-    const downs = new Set(children.map(child => child.center))
-    for (let c = min; c <= max; c += 1) {
-      put(row, c, junction(c === fromCol, downs.has(c), c > min, c < max), 'edge')
-    }
-    for (const child of children) {
-      put(rowAt(busRow + 1), child.center, '│', 'edge')
-      const path: Path = [[busRow, fromCol]]
-      const step = child.center >= fromCol ? 1 : -1
-      for (let c = fromCol + step; step > 0 ? c <= child.center : c >= child.center; c += step) path.push([busRow, c])
-      path.push([busRow + 1, child.center], [busRow + 2, child.center])
-      paths.set(child.item.id, path)
-    }
+  // 線を引く。道筋の向きをマスごとに集め、上下左右のつながりから罫線の文字を選ぶ(重なる道筋は分かれ目になる)。
+  // 道筋の最後のマスは子の箱の上の枠なので、線にはしない。最初のマスは親の下の枠(またはカード)につながる
+  const ways = new Map<string, { r: number; c: number; u: boolean; d: boolean; l: boolean; rt: boolean }>()
+  const way = (r: number, c: number) => {
+    const key = `${r}:${c}`
+    const found = ways.get(key)
+    if (found !== undefined) return found
+    const made = { r, c, u: false, d: false, l: false, rt: false }
+    ways.set(key, made)
+    return made
   }
+  const toward = (one: { u: boolean; d: boolean; l: boolean; rt: boolean }, dr: number, dc: number) => {
+    if (dr < 0) one.u = true
+    if (dr > 0) one.d = true
+    if (dc < 0) one.l = true
+    if (dc > 0) one.rt = true
+  }
+  for (const path of paths.values()) {
+    path.forEach(([r, c], k) => {
+      if (k === path.length - 1) return
+      const here = way(r, c)
+      if (k === 0) here.u = true
+      const next = path[k + 1]
+      if (next !== undefined) toward(here, next[0] - r, next[1] - c)
+      const prev = path[k - 1]
+      if (prev !== undefined) toward(here, prev[0] - r, prev[1] - c)
+    })
+  }
+  for (const { r, c, u, d, l, rt } of ways.values()) put(rowAt(r), c, junction(u, d, l, rt), 'edge')
 
   // 箱を描く
-  const drawNode = (node: Node, top: number) => {
-    const { item } = node
+  const drawNode = ({ item, x, y, parent }: Box) => {
+    const top = y + hubHeight
+    const center = x + Math.floor(nodeWidth / 2)
     const tone = nodeTone(item, now)
     const inner = nodeWidth - 4
     const border = (r: number, left: string, right: string, joinAt: number | undefined, join: string) => {
       const row = rowAt(r)
-      putText(row, node.x, `${left}${'─'.repeat(nodeWidth - 2)}${right}`, tone)
+      putText(row, x, `${left}${'─'.repeat(nodeWidth - 2)}${right}`, tone)
       if (joinAt !== undefined) put(row, joinAt, join, tone)
     }
-    border(top, '╭', '╮', node.center, '┴')
+    border(top, '╭', '╮', center, '┴')
     const lines = [titleSegs(item, inner), modelSegs(item), statusSegs(item, now)]
     lines.forEach((segs, i) => {
       const row = rowAt(top + 1 + i)
-      let at = putText(row, node.x, '│ ', tone)
+      let at = putText(row, x, '│ ', tone)
       let room = inner
       for (const seg of segs) {
         const text = fit(seg.text, room)
@@ -590,36 +739,27 @@ export const layoutMap = (
       at = putText(row, at, ' '.repeat(Math.max(0, room)), 'edge')
       putText(row, at, ' │', tone)
     })
-    border(top + NODE_ROWS - 1, '╰', '╯', node.children.length > 0 ? node.center : undefined, '┬')
+    border(top + NODE_ROWS - 1, '╰', '╯', parent ? center : undefined, '┬')
     // 消費トークンは下の枠の右寄りに、前後に空白を置いて載せる(終えてから分かる)
     const spent: MapSeg | undefined =
       item.agent.tokens === undefined ? undefined : { text: `${formatTokens(item.agent.tokens)} tok`, tone: 'note' }
     if (spent !== undefined) {
       const row = rowAt(top + NODE_ROWS - 1)
       const w = cellWidth(spent.text)
-      const right = node.x + nodeWidth - 3 - w
-      const left = node.x + 2
+      const right = x + nodeWidth - 3 - w
+      const left = x + 2
       // 子へ下ろす付け根 ┬ とは重ねない。右に置けなければ左に置く
       // 左下の角 ╰ を消さないよう、前の空白は角より右に置く
       const at =
-        right - 1 > node.x && (node.children.length === 0 || right - 1 > node.center)
+        right - 1 > x && (!parent || right - 1 > center)
           ? right
-          : left + w + 1 < node.center
+          : left + w + 1 < center
             ? left
             : undefined
       if (at !== undefined) putText(row, putText(row, putText(row, at - 1, ' ', tone), spent.text, spent.tone), ' ', tone)
     }
   }
-
-  const level = (depth: number) => hubHeight + depth * (LINK_ROWS + NODE_ROWS)
-  if (roots.length > 0) link(rootCenter, level(0), roots)
-  const walk = (node: Node) => {
-    const top = level(node.item.depth) + LINK_ROWS
-    drawNode(node, top)
-    if (node.children.length > 0) link(node.center, top + NODE_ROWS, node.children)
-    node.children.forEach(walk)
-  }
-  roots.forEach(walk)
+  plan.boxes.forEach(drawNode)
 
   // 実行中の道筋に光を流し、起動したては依頼の粒、終えたては結果の粒を置く
   const phase = Math.floor(now / TICK_MS)

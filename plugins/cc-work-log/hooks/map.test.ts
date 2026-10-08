@@ -151,19 +151,119 @@ test('メインがツールを使っているときは、カードにスピナ�
   expect(card[0]?.segs[0]?.tone).toBe('hub')
 })
 
-test('横か縦に入りきらなければ、終えたもの(古い順)、新しいもの、の順に省く', () => {
+test('横に入りきらなければ、次の行に折り返し、左端に下ろした線から分けてつなぐ', () => {
+  const agents = { 'agent-1': agent(1), 'agent-2': agent(2), 'agent-3': agent(3) }
+  const lines = still(draw(layoutMap([], agents, '', LATER, 30, 40)))
+
+  expect(lines.slice(5)).toEqual([
+    ' ╭──────────┬───────┴──────────╮',
+    ' │          │                  │',
+    ' │ ╭────────┴───────╮ ╭────────┴───────╮',
+    ' │ │ #1 Explore     │ │ #2 Explore     │',
+    ' │ │ haiku-5-5      │ │ haiku-5-5      │',
+    ' │ │ * 9秒          │ │ * 9秒          │',
+    ' │ ╰────────────────╯ ╰────────────────╯',
+    ' ╰──────────╮',
+    '            │',
+    '   ╭────────┴───────╮',
+    '   │ #3 Explore     │',
+    '   │ haiku-5-5      │',
+    '   │ * 9秒          │',
+    '   ╰────────────────╯',
+  ])
+  // 1行に入るなら、左端の線の列は空けない
+  expect(draw(layoutMap([], { 'agent-1': agent(1), 'agent-2': agent(2) }, '', LATER, 30, 40))[5]).toMatch(/^ {10}╭/)
+})
+
+test('62 × 34 ほどのペインでも、メインから起動した8体を省かずに2行に並べる', () => {
+  const agents: Record<string, WorkLogAgent> = {}
+  for (let no = 1; no <= 8; no += 1) agents[`agent-${no}`] = agent(no)
+  // ターミナルではキャラを入れたカードになり、ペインの見出しのぶん高さが減る
+  const lines = draw(layoutMap([], agents, '', LATER, 30, 62, { avatar: 9 }))
+  const rowOf = (no: number) => lines.findIndex(line => line.includes(`#${no} `))
+
+  expect([1, 2, 3, 4, 5, 6, 7, 8].map(rowOf).every(row => row >= 0)).toBe(true)
+  expect(lines.some(line => line.startsWith('ほか'))).toBe(false)
+  expect(new Set([1, 2, 3, 4].map(rowOf)).size).toBe(1)
+  expect(new Set([5, 6, 7, 8].map(rowOf)).size).toBe(1)
+  expect(rowOf(5)).toBeGreaterThan(rowOf(1))
+})
+
+test('孫がいれば、子を持つ箱を1行目に置き、折り返した行はその孫より下に置く', () => {
+  const agents = {
+    'agent-1': agent(1),
+    'agent-2': agent(2),
+    'agent-3': agent(3),
+    'agent-4': agent(4, { parentId: 'agent-1' }),
+    'agent-5': agent(5),
+  }
+  const lines = still(draw(layoutMap([], agents, '', LATER, 40, 40)))
+
+  expect(lines.slice(5)).toEqual([
+    ' ╭──────────┬───────┴──────────╮',
+    ' │          │                  │',
+    ' │ ╭────────┴───────╮ ╭────────┴───────╮',
+    ' │ │ #1 Explore     │ │ #2 Explore     │',
+    ' │ │ haiku-5-5      │ │ haiku-5-5      │',
+    ' │ │ * 9秒          │ │ * 9秒          │',
+    ' │ ╰────────┬───────╯ ╰────────────────╯',
+    ' │          │',
+    ' │          │',
+    ' │ ╭────────┴───────╮',
+    ' │ │ #4 Explore     │',
+    ' │ │ haiku-5-5      │',
+    ' │ │ * 9秒          │',
+    ' │ ╰────────────────╯',
+    ' ╰──────────┬──────────────────╮',
+    '            │                  │',
+    '   ╭────────┴───────╮ ╭────────┴───────╮',
+    '   │ #3 Explore     │ │ #5 Explore     │',
+    '   │ haiku-5-5      │ │ haiku-5-5      │',
+    '   │ * 9秒          │ │ * 9秒          │',
+    '   ╰────────────────╯ ╰────────────────╯',
+  ])
+})
+
+test('折り返した行の箱へも、依頼の粒と結果の粒が左端の線を通って流れる', () => {
+  const agents = { 'agent-1': agent(1), 'agent-2': agent(2), 'agent-3': agent(3) }
+  // 左端の線(列 1)の、1行目の箱の横にあたる行(8〜11 行目)を粒が通るか
+  const passes = (at: (ms: number) => readonly MapLine[], mark: string) =>
+    Array.from({ length: FLIGHT_MS / 50 }, (_, i) => draw(at(i * 50))).some(lines =>
+      lines.slice(8, 12).some(line => line[1] === mark),
+    )
+
+  expect(passes(ms => layoutMap([], agents, '', T0 + ms, 30, 40), '●')).toBe(true)
+  const end = T0 + 12_000
+  const done = { ...agents, 'agent-3': agent(3, { status: 'ok', durationMs: 12_000, endedAt: end }) }
+  expect(passes(ms => layoutMap([], done, '', end + ms, 30, 40), '◆')).toBe(true)
+  // 実行中なら、左端の線にも光が流れる
+  expect(layoutMap([], agents, '', LATER, 30, 40).slice(8, 12).some(line => line.segs[1]?.tone === 'live')).toBe(true)
+})
+
+test('広いペインでは、1行に5体より多く並べる', () => {
+  const agents: Record<string, WorkLogAgent> = {}
+  for (let no = 1; no <= 6; no += 1) agents[`agent-${no}`] = agent(no)
+  const lines = draw(layoutMap([], agents, '', LATER, 30, 120))
+
+  expect(lines.filter(line => /#\d/.test(line))).toHaveLength(1)
+  expect(cellWidth(lines[0] ?? '')).toBe(120)
+})
+
+test('折り返しても縦に入りきらなければ、終えたもの(古い順)、新しいもの、の順に省く', () => {
   const agents: Record<string, WorkLogAgent> = {}
   for (let no = 1; no <= 5; no += 1) {
     agents[`agent-${no}`] = agent(no, no <= 2 ? { status: 'ok', durationMs: 1000, endedAt: T0 + 100 } : {})
   }
-  const nos = (columns: number) =>
-    draw(layoutMap([], agents, '', LATER, 30, columns)).flatMap(line => [...line.matchAll(/#(\d)/g)].map(m => m[1]))
+  const nos = (rows: number) =>
+    draw(layoutMap([], agents, '', LATER, rows, 40)).flatMap(line => [...line.matchAll(/#(\d)/g)].map(m => m[1]))
 
-  // 40 マスには、14 マスの箱が2つまで
-  expect(nos(40)).toEqual(['3', '4'])
-  expect(draw(layoutMap([], agents, '', LATER, 30, 40)).at(-1)).toBe('ほか 3 体を省いた')
-  // 60 マスなら4つ。終えたものから省く
-  expect(nos(60)).toEqual(['2', '3', '4', '5'])
+  // 40 マスには1行に2つ。3行ぶんの高さがあれば、すべて並ぶ
+  expect(nos(26)).toEqual(['1', '2', '3', '4', '5'])
+  // 2行ぶんなら、終えたものから省く
+  expect(nos(20)).toEqual(['2', '3', '4', '5'])
+  // 終えたものを省いても入らなければ、新しいものを省く
+  expect(nos(19)).toEqual(['3', '4'])
+  expect(draw(layoutMap([], agents, '', LATER, 19, 40)).at(-1)).toBe('ほか 3 体を省いた')
   // 縦に入らなければ、入れ子の段ごと省く
   const nested = { ...agents, 'agent-6': agent(6, { parentId: 'agent-3' }) }
   expect(draw(layoutMap([], nested, '', LATER, 12, 72)).some(line => line.includes('#6'))).toBe(false)
