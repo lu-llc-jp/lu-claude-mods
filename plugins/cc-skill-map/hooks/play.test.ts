@@ -28,8 +28,10 @@ test('戻りしかない輪でも止まる', () => {
 test('時間割は、サブエージェントへの依頼と結果、承認の待ちを分けて並べる', () => {
   const flow = flowOf([step('a'), step('b', { actor: 'subagent', agent: 'x' }), step('c', { gate: true, actor: 'human' })])
   expect(timeline(flow).map(beat => beat.kind)).toEqual(['work', 'travel', 'dispatch', 'work', 'return', 'travel', 'wait'])
-  // 横に出さないときは、サブエージェントも1つの作業にする
-  expect(timeline(flow, false).map(beat => beat.kind)).toEqual(['work', 'travel', 'work', 'travel', 'wait'])
+  // 依頼しないときは、サブエージェントも1つの作業にする
+  expect(timeline(flow, []).map(beat => beat.kind)).toEqual(['work', 'travel', 'work', 'travel', 'wait'])
+  // 人にも依頼するなら、承認は依頼の粒が渡ってから待ち、結果の粒が戻る
+  expect(timeline(flow, ['subagent', 'human']).slice(-3).map(beat => beat.kind)).toEqual(['dispatch', 'wait', 'return'])
 })
 
 test('1コマには、今の手順・終えた手順・出てきた成果物を入れる。最後まで行ったら終えた姿になる', () => {
@@ -47,6 +49,7 @@ test('1コマには、今の手順・終えた手順・出てきた成果物を�
   expect(second.outputs).toEqual([{ text: 'メモ', at: WORK_MS }])
 
   const end = frameAt(flow, beats, playLength(beats) + 1)
+  expect(end.returnedAt).toBeUndefined()
   expect(end.isFinished).toBe(true)
   expect(end.done).toEqual([0, 1])
   // 同じ名前の成果物は1つにまとめる

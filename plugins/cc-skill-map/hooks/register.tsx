@@ -6,6 +6,8 @@ import { discoverSkills, sourceLabel, type FsLike } from './discover'
 import { FLOW_SYSTEM, flowPrompt, hashText, headingFlow, parseFlow, resolveFlowModel } from './flow'
 import { BOX_MIN, fit, flowAgents, hasSideAgents, layoutFlow, type FlowLine, type FlowSeg, type FlowTone } from './layout'
 import { TICK_MS, frameAt, timeline, type PlayFrame } from './play'
+import { STAGE_DELEGATED, STAGE_MIN, layoutStage, stageMoods } from './stage'
+import { humanAvatar, mainAvatar } from './avatar'
 
 const PANE = 'cc-skill-map'
 const COMMAND = 'cc-skill-map'
@@ -268,35 +270,99 @@ export const register: Register = (on, options) => {
     if (skill !== undefined) {
       const state = (await read($, flowsAtom))[skill.name]
       const agents = [...new Set([...skill.agents, ...(state?.status === 'ready' ? flowAgents(state.flow) : [])])]
+      // 幅があれば組織図、無ければ箱を縦に積む。組織図ではスクリプトと人にも依頼の粒を流す
+      const playable = state?.status === 'ready' && state.flow.steps.length > 0
+      const staged = playable && width >= STAGE_MIN
       // 再生しているなら、始めてからの時間の1コマを描く。最後まで再生したらタイマーを止め、終えた姿のまま残す
       const play = await read($, playAtom)
-      const playable = state?.status === 'ready' && state.flow.steps.length > 0
-      let frame: ReturnType<typeof frameAt> | undefined
+      const now = await $.clock.now()
+      let frame: PlayFrame | undefined
       if (playable && play !== null && play.skill === skill.name) {
-        frame = frameAt(state.flow, timeline(state.flow, hasSideAgents(state.flow, width)), (await $.clock.now()) - play.startedAt)
+        const delegated = staged ? STAGE_DELEGATED : hasSideAgents(state.flow, width) ? (['subagent'] as const) : []
+        frame = frameAt(state.flow, timeline(state.flow, delegated), now - play.startedAt)
         if (frame.isFinished) stopTicker()
         else animate($)
       }
       const playing = frame !== undefined && !frame.isFinished
+      const controls = (
+        <Box flexDirection="row" gap={1}>
+          <Button key="back" hotkey="b" onPress={() => backToList($)}>
+            一覧に戻る
+          </Button>
+          {!playable ? null : playing ? (
+            <Button key="stop" hotkey="p" onPress={() => stopPlay($)}>
+              止める
+            </Button>
+          ) : (
+            <Button key="play" hotkey="p" onPress={() => startPlay($, skill.name)}>
+              {frame === undefined ? '▶ 再生' : '▶ もう一度'}
+            </Button>
+          )}
+          <Button key="reload" hotkey="r" dimColor onPress={() => reload($, flowModel)}>
+            読み直す
+          </Button>
+        </Box>
+      )
+
+      if (staged && state?.status === 'ready') {
+        // スクロールせずに見えるよう、見出しは2〜3行に詰め、残りの高さを組織図と手順の一覧に回す
+        const flow = state.flow
+        const headRows = 2 + (flow.summary === undefined ? 0 : 1) + (state.note === undefined ? 0 : 1)
+        const stage = layoutStage(flow, width, Math.max(8, e.props.scroll.bodyRows - headRows), frame, {
+          avatars: e.surface === 'terminal',
+        })
+        const moods = stageMoods(flow, frame)
+        const { Raster } = $.ui.resolve(e)
+        return (
+          <Box flexDirection="column" width={width}>
+            {controls}
+            <Text wrap="truncate">
+              <Text bold>{skill.name}</Text>
+              <Text dimColor> · {sourceLabel(skill.source)}</Text>
+              {skill.agents.length === 0 ? null : <Text color="permission"> ← {skill.agents.join('、')}</Text>}
+              {flow.by === 'headings' ? <Text dimColor> · 見出しから作った簡易な流れ</Text> : null}
+            </Text>
+            {flow.summary === undefined ? null : (
+              <Text dimColor wrap="truncate">
+                {flow.summary}
+              </Text>
+            )}
+            {state.note === undefined ? null : (
+              <Text color="warning" wrap="truncate">
+                {state.note}
+              </Text>
+            )}
+            {stage.before.map(line => (
+              <FlowRow key={line.key} Text={Text} line={line} />
+            ))}
+            {stage.band === undefined ? null : (
+              <Box key={stage.band.key} flexDirection="row">
+                {stage.band.cols.map(col =>
+                  col.kind === 'raster' ? (
+                    <Raster
+                      key={`avatar:${col.who}`}
+                      {...(col.who === 'main' ? mainAvatar(moods.main, now) : humanAvatar(moods.human, now))}
+                    />
+                  ) : (
+                    <Box key={col.key} flexDirection="column">
+                      {col.rows.map((segs, r) => (
+                        <FlowRow key={`${col.key}:${r}`} Text={Text} line={{ key: `${col.key}:${r}`, segs }} />
+                      ))}
+                    </Box>
+                  ),
+                )}
+              </Box>
+            )}
+            {stage.after.map(line => (
+              <FlowRow key={line.key} Text={Text} line={line} />
+            ))}
+          </Box>
+        )
+      }
+
       return (
         <Box flexDirection="column" width={width}>
-          <Box flexDirection="row" gap={1}>
-            <Button key="back" hotkey="b" onPress={() => backToList($)}>
-              一覧に戻る
-            </Button>
-            {!playable ? null : playing ? (
-              <Button key="stop" hotkey="p" onPress={() => stopPlay($)}>
-                止める
-              </Button>
-            ) : (
-              <Button key="play" hotkey="p" onPress={() => startPlay($, skill.name)}>
-                {frame === undefined ? '▶ 再生' : '▶ もう一度'}
-              </Button>
-            )}
-            <Button key="reload" hotkey="r" dimColor onPress={() => reload($, flowModel)}>
-              読み直す
-            </Button>
-          </Box>
+          {controls}
           <Text wrap="truncate">
             <Text bold>{skill.name}</Text>
             <Text dimColor> · {sourceLabel(skill.source)}</Text>

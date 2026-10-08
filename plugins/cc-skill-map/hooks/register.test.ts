@@ -195,6 +195,31 @@ test('開くと手順の順に再生し、止める・もう一度ができる',
   await ui.unmount()
 })
 
+test('幅があれば組織図にし、ターミナルではメインと人のカードにキャラを描く', async ($, on) => {
+  const world = newWorld()
+  const clock = answerWorld(on, world)
+  await start($)
+  await run($, 'notes')
+  await clock.settle()
+  await clock.advance(300)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mountPane($, surface, 100)
+    if (surface === 'terminal') {
+      expect((await ui.findAll({ type: 'Raster' })).map(one => one.props.key)).toEqual(['avatar:main', 'avatar:human'])
+      expect(await ui.find({ text: /╭─ メイン ─+╮ +╭─ 人 ─+╮/ })).toBeDefined()
+    } else {
+      // デスクトップには Raster が無いので、キャラを省いて見出しに ◉ を付ける
+      expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+      expect(await ui.find({ text: /╭─ ◉ メイン ─+╮ +╭─ ◉ 人 ─+╮/ })).toBeDefined()
+    }
+    // メインの下にスクリプトとサブエージェントの箱、その下に手順の一覧
+    expect(await ui.find({ text: /╭─┴─ researcher ─+╮ +╭─┴─ スクリプト ─+╮/ })).toBeDefined()
+    expect(await ui.find({ text: /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 1 メモを受け取る 人$/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
 test('2回目は使い回してモデルを呼ばず、SKILL.md が変わったら読み取り直す', async ($, on) => {
   const world = newWorld()
   const clock = answerWorld(on, world)

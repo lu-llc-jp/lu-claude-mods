@@ -68,7 +68,7 @@ test('スキル全体の成果物を末尾にまとめる', () => {
 
 test('どの行も幅に収める', () => {
   for (const width of [20, 33, 42, 60, 80, 140]) {
-    const beats = timeline(FLOW, hasSideAgents(FLOW, width))
+    const beats = timeline(FLOW, hasSideAgents(FLOW, width) ? ['subagent'] : [])
     for (const elapsed of [undefined, 0, 1000, 5000, 99_999]) {
       const frame = elapsed === undefined ? undefined : frameAt(FLOW, beats, elapsed)
       for (const line of layoutFlow(FLOW, width, frame)) {
@@ -96,7 +96,7 @@ test('飛び先だけを持つ手順からは線を下ろさず、飛び先を�
 
 // ---- 再生 ----
 
-const beats = timeline(FLOW, true)
+const beats = timeline(FLOW, ['subagent'])
 const at = (elapsed: number) => layoutFlow(FLOW, 60, frameAt(FLOW, beats, elapsed))
 
 test('再生では、進めている手順を光らせて回る印を付け、終えた手順に ✓ を付ける', () => {

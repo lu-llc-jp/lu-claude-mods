@@ -1,4 +1,4 @@
-import type { SkillFlow } from '../types'
+import type { FlowActor, SkillFlow } from '../types'
 
 /** 再生中の描き直しの間隔(ms)。粒が滑らかに見える速さ */
 export const TICK_MS = 150
@@ -55,8 +55,11 @@ export const visitOrder = (flow: SkillFlow): number[] => {
   return order
 }
 
-/** 再生の時間割。sideAgents が false なら、サブエージェントの手順も横に出さずに進める */
-export const timeline = (flow: SkillFlow, sideAgents = true): Beat[] => {
+/**
+ * 再生の時間割。delegated に入れた担い手の手順は、メインから依頼の粒が渡り、作業のあと結果の粒が戻る。
+ * それ以外の手順はメインがその場で進める
+ */
+export const timeline = (flow: SkillFlow, delegated: readonly FlowActor[] = ['subagent']): Beat[] => {
   const beats: Beat[] = []
   const order = visitOrder(flow)
   order.forEach((step, k) => {
@@ -65,9 +68,9 @@ export const timeline = (flow: SkillFlow, sideAgents = true): Beat[] => {
       beats.push({ kind: 'travel', from, to: step, via: step === from + 1 ? 'down' : 'jump', ms: TRAVEL_MS })
     }
     const one = flow.steps[step]
-    if (sideAgents && one.actor === 'subagent') {
+    if (delegated.includes(one.actor)) {
       beats.push({ kind: 'dispatch', step, ms: DISPATCH_MS })
-      beats.push({ kind: 'work', step, ms: WORK_MS })
+      beats.push({ kind: one.gate === true ? 'wait' : 'work', step, ms: one.gate === true ? WAIT_MS : WORK_MS })
       beats.push({ kind: 'return', step, ms: DISPATCH_MS })
     } else if (one.gate === true) {
       beats.push({ kind: 'wait', step, ms: WAIT_MS })
@@ -94,6 +97,8 @@ export type PlayFrame = {
   done: number[]
   /** 出てきた成果物(出た順)。at は出た時刻(始めてからの ms) */
   outputs: Array<{ text: string; at: number }>
+  /** 最後に結果の粒がメインに届いた時刻(始めてからの ms)。まだ無ければ無い */
+  returnedAt?: number
   /** 最後まで再生したら true */
   isFinished: boolean
 }
@@ -109,15 +114,18 @@ export const frameAt = (flow: SkillFlow, beats: readonly Beat[], elapsed: number
     }
   }
   let t = 0
+  let returnedAt: number | undefined
+  const back = () => (returnedAt === undefined ? {} : { returnedAt })
   for (const [i, beat] of beats.entries()) {
     if (elapsed < t + beat.ms) {
       const progress = Math.max(0, Math.min(1, (elapsed - t) / beat.ms))
       const current = beat.kind === 'travel' ? beat.to : beat.step
       // 戻ってきてもう一度進める手順は、終えた印を外す
       done.delete(current)
-      return { elapsed, beat, progress, current, done: [...done], outputs, isFinished: false }
+      return { elapsed, beat, progress, current, done: [...done], outputs, ...back(), isFinished: false }
     }
     t += beat.ms
+    if (beat.kind === 'return') returnedAt = t
     // 手順を終えるのは、その手順の最後の区切りが済んだとき
     if (beat.kind === 'work' || beat.kind === 'wait' || beat.kind === 'return') {
       if (i === beats.length - 1 || beats[i + 1].kind === 'travel') reveal(beat.step, t)
@@ -127,5 +135,5 @@ export const frameAt = (flow: SkillFlow, beats: readonly Beat[], elapsed: number
     const text = output.where === undefined ? output.name : `${output.name} — ${output.where}`
     if (!outputs.some(one => one.text === text || one.text === output.name)) outputs.push({ text, at: t })
   }
-  return { elapsed, progress: 1, done: [...done], outputs, isFinished: true }
+  return { elapsed, progress: 1, done: [...done], outputs, ...back(), isFinished: true }
 }
