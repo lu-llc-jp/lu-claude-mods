@@ -14,18 +14,17 @@ export const TYPE_MS = 600
 export const RECENT_MS = 10 * 60_000
 /** 実行中を示すスピナーのコマ */
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-/** 幹の列。メインのカードの下から下ろす */
-const TRUNK = 3
-/** 幹からサブエージェントの点までの枝の長さ(マス) */
-const BRANCH = 5
-/** サブエージェントから、その起動したサブエージェントまでの枝の長さ(マス) */
-const NEST_BRANCH = 3
 /** マップの幅の上限。広いペインでも線が間延びしないように止める */
 const HUB_MAX = 72
-/** 名前に残したい幅(マス)。これより狭くなるならモデルを外す */
-const MIN_NAME = 14
+/** 箱の幅の下限と上限(マス)。箱を横に並べて入らなければ、下限まで縮めてから省く */
+const NODE_MIN = 14
+const NODE_MAX = 24
+/** 箱の高さ(上下の枠 + 中身3行) */
+const NODE_ROWS = 5
+/** 親の箱の下から子の箱の上までの行数(横に分ける行 + 下ろす行) */
+const LINK_ROWS = 2
 /** 流れる光の間隔(マス) */
-const PULSE_GAP = 5
+const PULSE_GAP = 4
 
 /**
  * マップの1区切りの色分け。
@@ -277,13 +276,13 @@ export const hueOf = (type: string): number => {
 }
 
 /** メインのカード(4行)。上の枠に見出しとモデル、中に今の様子とサブエージェントの数 */
-/** withTrunk: 下に幹の付け根 ┬ を付ける。withMark: 見出しに ◉ を付ける(キャラを横に描くときは付けない) */
+/** trunkAt: 下の枠に付け根 ┬ を付ける列(付けないなら undefined)。withMark: 見出しに ◉ を付ける(キャラを横に描くときは付けない) */
 const hubRows = (
   scene: Scene,
   mainModel: string,
   width: number,
   now: number,
-  withTrunk: boolean,
+  trunkAt: number | undefined,
   withMark: boolean,
 ): Row[] => {
   const { main, items } = scene
@@ -340,78 +339,67 @@ const hubRows = (
 
   const bottom: Row = { key: 'hub:bottom', cells: [], tail: [] }
   putText(bottom, 0, `╰${'─'.repeat(width - 2)}╯`, tone)
-  if (withTrunk) put(bottom, TRUNK, '┬', tone)
+  if (trunkAt !== undefined) put(bottom, trunkAt, '┬', tone)
 
   return [top, body('hub:now', doing), body('hub:count', count), bottom]
 }
 
-/** 点の列 */
-const nodeColumn = (depth: number): number => TRUNK + BRANCH + 1 + depth * (NEST_BRANCH + 1)
-/** 枝が出る列。メインからなら幹、入れ子なら親の点の列 */
-const forkColumn = (depth: number): number => (depth === 0 ? TRUNK : nodeColumn(depth - 1))
-
-/** 1体の名前の行。点と、その右の番号・種類・名前・右寄せの時間 */
-const agentRow = (item: Item, mainModel: string, width: number, now: number): Row => {
-  const row: Row = { key: `agent:${item.id}`, cells: [], tail: [] }
-  const node = nodeColumn(item.depth)
-  const done = item.status !== 'running'
-  if (done) put(row, node, item.status === 'ok' ? '✓' : '✗', item.status)
-  else put(row, node, spinner(now), 'spin')
-
+/** 箱の1行目: 番号と種類。メインと違うモデルは、入るときだけ添える */
+const titleSegs = (item: Item, mainModel: string, room: number): MapSeg[] => {
   const { agent } = item
-  // メインと同じモデルなら書かない。違うときだけ目印になる
-  const model = agent.model !== '' && shortModel(agent.model) !== shortModel(mainModel) ? shortModel(agent.model) : ''
-  const time = done
-    ? agent.durationMs === undefined
-      ? ''
-      : seconds(agent.durationMs)
-    : item.startedAt === undefined
-      ? ''
-      : seconds(Math.max(0, now - item.startedAt))
-
-  const headOf = (withModel: boolean): MapSeg[] => [
-    { text: ` #${agent.no} `, tone: 'no' },
-    { text: shortType(agent.type), tone: 'type', hue: hueOf(agent.type) },
-    ...(withModel && model !== '' ? [{ text: `·${model}`, tone: 'note' as const }] : []),
-    { text: '  ', tone: 'edge' },
+  const no = `#${agent.no} `
+  const type = shortType(agent.type)
+  const model = agent.model !== '' && shortModel(agent.model) !== shortModel(mainModel) ? `·${shortModel(agent.model)}` : ''
+  return [
+    { text: no, tone: 'no' },
+    { text: fit(type, room - cellWidth(no)), tone: 'type', hue: hueOf(agent.type) },
+    ...(model !== '' && cellWidth(no + type + model) <= room ? [{ text: model, tone: 'note' as const }] : []),
   ]
-  const usedBy = (segs: readonly MapSeg[]) => node + 1 + segs.reduce((sum, seg) => sum + cellWidth(seg.text), 0)
-  // 名前がいちばん大事なので、名前の入る幅が足りなければモデルを外す
-  const full = headOf(true)
-  const head = width - usedBy(full) - (cellWidth(time) + 1) >= MIN_NAME ? full : headOf(false)
-  const used = usedBy(head)
+}
 
-  // 起動したては名前を1文字ずつ打ち出す
+/** 箱の下の枠に添える時間。実行中は経過時間、終えたら所要時間 */
+const timeSeg = (item: Item, now: number): MapSeg | undefined => {
+  const { agent } = item
+  if (item.status !== 'running') return agent.durationMs === undefined ? undefined : { text: seconds(agent.durationMs), tone: 'note' }
+  return item.startedAt === undefined ? undefined : { text: seconds(Math.max(0, now - item.startedAt)), tone: 'timeLive' }
+}
+
+/** 箱の2行目: 頼まれたこと。起動したては1文字ずつ打ち出す */
+const nameSegs = (item: Item, room: number, now: number): MapSeg[] => {
+  const done = item.status !== 'running'
   const typing = !done && item.startedAt !== undefined && now - item.startedAt < TYPE_MS
-  const chars = [...agent.name]
-  const shownName = typing
+  const chars = [...item.agent.name]
+  const shown = typing
     ? chars.slice(0, Math.ceil((chars.length * Math.max(0, now - (item.startedAt ?? now))) / TYPE_MS)).join('')
-    : agent.name
-  const cursor = typing ? 1 : 0
-  const timeRoom = time === '' ? 0 : cellWidth(time) + 1
-  const name = fit(shownName, Math.max(4, width - used - timeRoom - cursor))
+    : item.agent.name
+  return [
+    { text: fit(shown, room - (typing ? 1 : 0)), tone: done ? 'labelDone' : 'label' },
+    ...(typing ? [{ text: '▍', tone: 'cursor' as const }] : []),
+  ]
+}
 
-  const tail: MapSeg[] = [...head, { text: name, tone: done ? 'labelDone' : 'label' }]
-  if (typing) tail.push({ text: '▍', tone: 'cursor' })
-  if (time !== '') {
-    const pad = width - used - cellWidth(name) - cursor - cellWidth(time)
-    tail.push({ text: ' '.repeat(Math.max(1, pad)), tone: 'edge' })
-    tail.push({ text: time, tone: done ? 'note' : 'timeLive' })
+/** 箱の3行目: 今していること、または結果 */
+const activitySegs = (item: Item, room: number, now: number): MapSeg[] => {
+  if (item.status === 'running') {
+    return [
+      { text: `${spinner(now)} `, tone: 'spin' },
+      { text: fit(item.tool ?? '考えています', room - 2), tone: 'tool' },
+    ]
   }
-  row.tail = tail
-  return row
+  return item.status === 'ok' ? [{ text: '✓ 回答した', tone: 'ok' }] : [{ text: fit('✗ 中断・エラー', room), tone: 'error' }]
 }
 
-/** 実行中のツールの行。点の下から右にずらして添える */
-const toolRow = (item: Item, width: number): Row => {
-  const col = nodeColumn(item.depth) + 2
-  const row: Row = { key: `tool:${item.id}`, cells: [], tail: [] }
-  put(row, col - 1, ' ', 'edge')
-  row.tail = [{ text: fit(item.tool ?? '', width - col), tone: 'tool' }]
-  return row
-}
+/** 箱の枠の色。実行中は目立たせ、終えたら沈める。終えた瞬間は緑に光り、失敗は赤 */
+const nodeTone = (item: Item, now: number): MapTone =>
+  item.status === 'error'
+    ? 'error'
+    : item.endedAt !== undefined && now >= item.endedAt && now - item.endedAt < FLASH_MS
+      ? 'hubFlash'
+      : item.status === 'running'
+        ? 'hub'
+        : 'hubIdle'
 
-/** 道筋。粒と光が通るマスを、出どころから点の手前まで順に並べたもの */
+/** 道筋。粒と光が通るマスを、出どころから箱の上の枠まで順に並べたもの */
 type Path = Array<[row: number, col: number]>
 
 /** 線のマスを塗り替える。強いもの(粒 > 尾 > 光 > 線)を弱いもので上書きしない */
@@ -424,14 +412,26 @@ const tint = (rows: readonly Row[], [r, c]: [number, number], tone: MapTone, tex
   row.cells[c] = { text: text ?? cell.text, tone }
 }
 
+/** 上下左右のどちらへ線が伸びるかから、罫線の文字を選ぶ */
+const junction = (up: boolean, down: boolean, left: boolean, right: boolean): string => {
+  const key = `${up ? 'u' : ''}${down ? 'd' : ''}${left ? 'l' : ''}${right ? 'r' : ''}`
+  const table: Record<string, string> = {
+    udlr: '┼', udl: '┤', udr: '├', ulr: '┴', dlr: '┬', ud: '│', lr: '─',
+    dr: '╭', dl: '╮', ur: '╰', ul: '╯', u: '│', d: '│', l: '─', r: '─',
+  }
+  return table[key] ?? ' '
+}
+
+type Node = { item: Item; children: Node[]; x: number; width: number; center: number }
+
 /**
- * マップの行を組み立てる。
- * メインを枠で囲んだカードにして上に置き、その下に幹を下ろして、サブエージェントを起動した順に枝で吊るす。
- * サブエージェントが起動したものは、親の点から下ろした枝に、一段右へずらして吊るす。
- * 実行中の道筋には光が外へ流れ、起動したては依頼の粒が外へ、終えたては結果の粒が出どころへ戻る。
+ * マップの行を組み立てる。組織図のように、メインのカードを上に置き、その下に子のエージェントを箱にして横に並べる。
+ * サブエージェントが起動したものは、親の箱の下に同じように並べる。箱は起動した順に左から置く。
+ * 親から子へは、親の下から線を下ろして横に分け、子の箱の上へ下ろす。
+ * 実行中の線には光が流れ、起動したては依頼の粒が親から子へ、終えたては結果の粒が子から親へ流れる。
  * 置くのは、実行中のものと、終えてから RECENT_MS 以内のもの。
- * rows に入りきらなければ、あいだの空き行、終えたもの(古い順)、今のツールの行、新しいもの、の順に省く。
- * 先頭の4行(key が hub: で始まる)がメインのカード
+ * 横か縦に入りきらなければ、終えたもの(古い順)、新しいもの、の順に省く。
+ * 先頭の4行(key が hub: で始まる)がメインのカード。avatar > 0 なら、描く側がカードの左に avatar 列のキャラを置く
  */
 export const layoutMap = (
   list: readonly WorkLogEntry[],
@@ -445,8 +445,6 @@ export const layoutMap = (
   const scene = buildScene(list, agents, now)
   const width = Math.max(24, Math.min(columns, HUB_MAX))
   let kept = scene.items.map(item => item.id)
-  let showTool = true
-  let spaced = true
   let omitted = 0
 
   const placed = (): Item[] => {
@@ -456,18 +454,22 @@ export const layoutMap = (
       return item === undefined ? [] : [{ ...item, depth }]
     })
   }
-  const height = (): number => {
-    const items = placed()
-    const groups = items.filter(item => item.depth === 0).length
-    return (
-      4 +
-      (items.length > 0 ? 1 : 0) +
-      (omitted > 0 ? 1 : 0) +
-      (spaced ? Math.max(0, groups - 1) : 0) +
-      items.reduce((sum, item) => sum + 1 + (showTool && item.tool !== undefined ? 1 : 0), 0)
-    )
+  const parentOf = (item: Item, ids: ReadonlySet<string>): string | undefined => {
+    const parent = agentOf(agents, item.id)?.parentId
+    return parent !== undefined && ids.has(parent) ? parent : undefined
   }
-
+  /** 葉(子の無い箱)の数。横に並ぶ箱の数の最大になる */
+  const leaves = (items: readonly Item[]): number => {
+    const ids = new Set(items.map(item => item.id))
+    const parents = new Set(items.flatMap(item => parentOf(item, ids) ?? []))
+    return items.filter(item => !parents.has(item.id)).length
+  }
+  const fits = (): boolean => {
+    const items = placed()
+    const levels = items.reduce((max, item) => Math.max(max, item.depth + 1), 0)
+    const height = 4 + levels * (LINK_ROWS + NODE_ROWS) + (omitted > 0 ? 1 : 0)
+    return height <= rows && leaves(items) * (NODE_MIN + 1) - 1 <= width
+  }
   const byNo = (id: string) => agentOf(agents, id)?.no ?? 0
   const statusOf = (id: string) => scene.items.find(item => item.id === id)?.status
   const drop = (pick: (ids: string[]) => string | undefined): boolean => {
@@ -477,93 +479,164 @@ export const layoutMap = (
     omitted += 1
     return true
   }
-  if (height() > rows) spaced = false
-  while (height() > rows && drop(ids => ids.filter(id => statusOf(id) !== 'running').sort((a, b) => byNo(a) - byNo(b))[0]));
-  if (height() > rows) showTool = false
-  while (height() > rows && drop(ids => [...ids].sort((a, b) => byNo(b) - byNo(a))[0]));
+  while (!fits() && drop(ids => ids.filter(id => statusOf(id) !== 'running').sort((a, b) => byNo(a) - byNo(b))[0]));
+  while (!fits() && drop(ids => [...ids].sort((a, b) => byNo(b) - byNo(a))[0]));
 
   const items = placed()
-  // avatar > 0 なら、描く側がカードの左に avatar 列のキャラを置く。幹はキャラから下ろすので、カードには付け根を付けない
-  const out: Row[] = hubRows(scene, mainModel, width - avatar, now, items.length > 0 && avatar === 0, avatar === 0)
-  const hubBottom = out.length - 1
-  if (items.length > 0) out.push({ key: 'gap:hub', cells: [], tail: [] })
+  const ids = new Set(items.map(item => item.id))
+  // 箱の幅は、葉を横に並べて入る幅にする
+  const nodeWidth = Math.max(NODE_MIN, Math.min(NODE_MAX, Math.floor((width + 1) / Math.max(1, leaves(items))) - 1))
 
-  // 行を並べ、名前の行の位置を覚えておく。枝と幹はあとで引く
-  const rowOf = new Map<string, number>()
-  items.forEach((item, i) => {
-    if (spaced && item.depth === 0 && i > 0) out.push({ key: `gap:${item.id}`, cells: [], tail: [] })
-    rowOf.set(item.id, out.length)
-    out.push(agentRow(item, mainModel, width, now))
-    if (showTool && item.tool !== undefined) out.push(toolRow(item, width))
-  })
-
-  const parentRow = (item: Item): number => {
-    if (item.depth === 0) return hubBottom
-    const parent = agentOf(agents, item.id)?.parentId
-    return (parent === undefined ? undefined : rowOf.get(parent)) ?? hubBottom
-  }
-  // 同じ出どころから出る枝のうち、最後のものは ╰、それ以外は ├
-  const lastChild = new Map<string, string>()
-  for (const item of items) lastChild.set(`${item.depth}:${parentRow(item)}`, item.id)
-
-  // 枝と幹を引き、粒と光が通る道筋を覚える
-  const paths = new Map<string, Path>()
+  // 木を作り、左から順に場所を決める(親は子の並びの真ん中に置く)
+  const nodes = new Map<string, Node>()
+  for (const item of items) nodes.set(item.id, { item, children: [], x: 0, width: nodeWidth, center: 0 })
+  const roots: Node[] = []
   for (const item of items) {
-    const r = rowOf.get(item.id)
-    const row = r === undefined ? undefined : out[r]
-    if (r === undefined || row === undefined) continue
-    const fork = forkColumn(item.depth)
-    const node = nodeColumn(item.depth)
-    const from = parentRow(item)
-    const path: Path = []
-    for (let i = from + 1; i < r; i += 1) {
-      const between = out[i]
-      if (between === undefined) continue
-      const here = between.cells[fork]
-      if (here === undefined || here.text === ' ') put(between, fork, '│', 'edge')
-      path.push([i, fork])
+    const node = nodes.get(item.id)
+    if (node === undefined) continue
+    const parent = parentOf(item, ids)
+    const parentNode = parent === undefined ? undefined : nodes.get(parent)
+    if (parentNode === undefined) roots.push(node)
+    else parentNode.children.push(node)
+  }
+  const span = (node: Node): number =>
+    node.children.length === 0
+      ? nodeWidth
+      : Math.max(nodeWidth, node.children.reduce((sum, child) => sum + span(child), 0) + node.children.length - 1)
+  const place = (node: Node, left: number) => {
+    const total = span(node)
+    let x = left + Math.floor((total - (node.children.reduce((sum, child) => sum + span(child), 0) + Math.max(0, node.children.length - 1))) / 2)
+    for (const child of node.children) {
+      place(child, x)
+      x += span(child) + 1
     }
-    put(row, fork, lastChild.get(`${item.depth}:${from}`) === item.id ? '╰' : '├', 'edge')
-    path.push([r, fork])
-    for (let c = fork + 1; c < node; c += 1) {
-      put(row, c, '─', 'edge')
-      path.push([r, c])
-    }
-    paths.set(item.id, path)
+    const first = node.children[0]
+    const last = node.children.at(-1)
+    node.center =
+      first === undefined || last === undefined ? left + Math.floor(total / 2) : Math.floor((first.center + last.center) / 2)
+    node.x = Math.max(0, Math.min(width - nodeWidth, node.center - Math.floor(nodeWidth / 2)))
+    node.center = node.x + Math.floor(nodeWidth / 2)
+  }
+  const forest = roots.reduce((sum, root) => sum + span(root), 0) + Math.max(0, roots.length - 1)
+  // メインの付け根は、カードの真ん中。子の並びもそこを中心に置く
+  const hubWidth = width - avatar
+  const rootCenter = avatar + Math.floor(hubWidth / 2)
+  let x = Math.max(0, Math.min(width - forest, rootCenter - Math.floor(forest / 2)))
+  for (const root of roots) {
+    place(root, x)
+    x += span(root) + 1
   }
 
-  // 実行中の道筋に、外へ流れる光を置く
+  const out: Row[] = hubRows(scene, mainModel, hubWidth, now, roots.length > 0 ? rootCenter - avatar : undefined, avatar === 0)
+  const rowAt = (r: number): Row => {
+    while (out.length <= r) out.push({ key: `row:${out.length}`, cells: [], tail: [] })
+    return out[r] as Row
+  }
+
+  // 親(メインなら幹)の下から子の箱の上までの線を引き、道筋を覚える
+  const paths = new Map<string, Path>()
+  const link = (fromCol: number, busRow: number, children: readonly Node[]) => {
+    const cols = [fromCol, ...children.map(child => child.center)]
+    const min = Math.min(...cols)
+    const max = Math.max(...cols)
+    const row = rowAt(busRow)
+    const downs = new Set(children.map(child => child.center))
+    for (let c = min; c <= max; c += 1) {
+      put(row, c, junction(c === fromCol, downs.has(c), c > min, c < max), 'edge')
+    }
+    for (const child of children) {
+      put(rowAt(busRow + 1), child.center, '│', 'edge')
+      const path: Path = [[busRow, fromCol]]
+      const step = child.center >= fromCol ? 1 : -1
+      for (let c = fromCol + step; step > 0 ? c <= child.center : c >= child.center; c += step) path.push([busRow, c])
+      path.push([busRow + 1, child.center], [busRow + 2, child.center])
+      paths.set(child.item.id, path)
+    }
+  }
+
+  // 箱を描く
+  const drawNode = (node: Node, top: number) => {
+    const { item } = node
+    const tone = nodeTone(item, now)
+    const inner = nodeWidth - 4
+    const border = (r: number, left: string, right: string, joinAt: number | undefined, join: string) => {
+      const row = rowAt(r)
+      putText(row, node.x, `${left}${'─'.repeat(nodeWidth - 2)}${right}`, tone)
+      if (joinAt !== undefined) put(row, joinAt, join, tone)
+    }
+    border(top, '╭', '╮', node.center, '┴')
+    const lines = [titleSegs(item, mainModel, inner), nameSegs(item, inner, now), activitySegs(item, inner, now)]
+    lines.forEach((segs, i) => {
+      const row = rowAt(top + 1 + i)
+      let at = putText(row, node.x, '│ ', tone)
+      let room = inner
+      for (const seg of segs) {
+        const text = fit(seg.text, room)
+        at = putText(row, at, text, seg.tone, seg.hue)
+        room -= cellWidth(text)
+      }
+      at = putText(row, at, ' '.repeat(Math.max(0, room)), 'edge')
+      putText(row, at, ' │', tone)
+    })
+    border(top + NODE_ROWS - 1, '╰', '╯', node.children.length > 0 ? node.center : undefined, '┬')
+    // 時間は下の枠の右寄りに、前後に空白を置いて載せる
+    const time = timeSeg(item, now)
+    if (time !== undefined) {
+      const row = rowAt(top + NODE_ROWS - 1)
+      const w = cellWidth(time.text)
+      const right = node.x + nodeWidth - 3 - w
+      const left = node.x + 2
+      // 子へ下ろす付け根 ┬ とは重ねない。右に置けなければ左に置く
+      const at =
+        node.children.length === 0 || right - 1 > node.center
+          ? right
+          : left + w + 1 < node.center
+            ? left
+            : undefined
+      if (at !== undefined) putText(row, putText(row, putText(row, at - 1, ' ', tone), time.text, time.tone), ' ', tone)
+    }
+  }
+
+  const level = (depth: number) => 4 + depth * (LINK_ROWS + NODE_ROWS)
+  if (roots.length > 0) link(rootCenter, level(0), roots)
+  const walk = (node: Node) => {
+    const top = level(node.item.depth) + LINK_ROWS
+    drawNode(node, top)
+    if (node.children.length > 0) link(node.center, top + NODE_ROWS, node.children)
+    node.children.forEach(walk)
+  }
+  roots.forEach(walk)
+
+  // 実行中の道筋に光を流し、起動したては依頼の粒、終えたては結果の粒を置く
   const phase = Math.floor(now / TICK_MS)
   for (const item of items) {
     const path = paths.get(item.id)
-    if (path === undefined || item.status !== 'running') continue
-    path.forEach((at, k) => {
-      if ((((k - phase) % PULSE_GAP) + PULSE_GAP) % PULSE_GAP === 0) tint(out, at, 'live')
-    })
-  }
-
-  // 依頼の粒は出どころから点へ、結果の粒は点から出どころへ。粒の後ろに2マスの尾を引く
-  for (const item of items) {
-    const path = paths.get(item.id)
     if (path === undefined || path.length === 0) continue
-    const fly = (at: number, steps: Path, head: string, tone: MapTone, trail: MapTone) => {
-      const k = Math.min(steps.length - 1, Math.floor(((now - at) / FLIGHT_MS) * steps.length))
+    // 箱の上の枠(最後のマス)には粒も光も置かない
+    const steps = path.slice(0, -1)
+    if (item.status === 'running') {
+      steps.forEach((at, k) => {
+        if ((((k - phase) % PULSE_GAP) + PULSE_GAP) % PULSE_GAP === 0) tint(out, at, 'live')
+      })
+    }
+    const fly = (at: number, route: Path, head: string, tone: MapTone, trail: MapTone) => {
+      const k = Math.min(route.length - 1, Math.floor(((now - at) / FLIGHT_MS) * route.length))
       for (const back of [2, 1]) {
-        const cell = steps[k - back]
+        const cell = route[k - back]
         if (cell !== undefined) tint(out, cell, trail)
       }
-      const cell = steps[k]
+      const cell = route[k]
       if (cell !== undefined) tint(out, cell, tone, head)
     }
     if (inFlight(item.endedAt, now) && item.endedAt !== undefined) {
-      fly(item.endedAt, [...path].reverse(), '◆', 'back', 'backTrail')
+      fly(item.endedAt, [...steps].reverse(), '◆', 'back', 'backTrail')
     } else if (inFlight(item.startedAt, now) && item.startedAt !== undefined) {
-      fly(item.startedAt, path, '●', 'flow', 'flowTrail')
+      fly(item.startedAt, steps, '●', 'flow', 'flowTrail')
     }
   }
 
   const lines = out.map(toLine)
-  if (omitted > 0) lines.push({ key: 'more', segs: [{ text: `   ほか ${omitted} 体を省いた`, tone: 'more' }] })
+  if (omitted > 0) lines.push({ key: 'more', segs: [{ text: `ほか ${omitted} 体を省いた`, tone: 'more' }] })
   return lines
 }
 

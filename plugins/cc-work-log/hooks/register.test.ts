@@ -442,8 +442,10 @@ test('ペインのボタンで一覧・ツリー・マップを順に回す', as
       expect(await ui.find({ type: 'Raster' })).toBeUndefined()
       expect(await ui.find({ text: /╭─ ◉ メイン ─+ opus-5-5 ─╮/ })).toBeDefined()
     }
-    expect(await ui.find({ text: /├[─◆]+✓ #1 Explore·haiku {2}テストを調べる +12秒/ })).toBeDefined()
-    expect(await ui.find({ text: /╰[─●]+[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #2 Explore·haiku / })).toBeDefined()
+    // 子は組織図の箱。#1 は終えて ✓、#2 は実行中
+    expect(await ui.find({ text: /│ #1 Explore·haiku +│ │ #2 Explore·haiku +│/ })).toBeDefined()
+    expect(await ui.find({ text: /│ ✓ 回答した +│ │ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 考えています +│/ })).toBeDefined()
+    expect(await ui.find({ text: /╰─+ 12秒 ─╯/ })).toBeDefined()
 
     await ui.press({ key: 'toggle-view' })
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
@@ -478,7 +480,7 @@ const watchMap = (on: On) => {
   return redraws
 }
 
-test('マップでは、サブエージェント2つに2本の枝が伸び、依頼の粒が流れる', { options: { view: 'map' } }, async ($, on) => {
+test('マップでは、組織図のようにサブエージェント2つの箱が並び、依頼の粒が流れる', { options: { view: 'map' } }, async ($, on) => {
   const clock = answerBasics(on)
   answerTools(on)
   watchMap(on)
@@ -495,8 +497,7 @@ test('マップでは、サブエージェント2つに2本の枝が伸び、依
     expect(await ui.find({ text: surface === 'terminal' ? /^╭─ メイン/ : /^╭─ ◉ メイン/ })).toBeDefined()
     // サブエージェントはドット絵にせず、文字の枝で描く。Raster はメインのキャラの1つだけ
     expect(await ui.findAll({ type: 'Raster' })).toHaveLength(surface === 'terminal' ? 1 : 0)
-    expect(await ui.find({ text: /├.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #1 Explore·haiku/ })).toBeDefined()
-    expect(await ui.find({ text: /╰.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #2 Explore·haiku/ })).toBeDefined()
+    expect(await ui.find({ text: /│ #1 Explore·haiku +│ │ #2 Explore·haiku +│/ })).toBeDefined()
     // 起動したての依頼の粒が、まだ道筋の上にいる
     expect(await ui.find({ text: /●/ })).toBeDefined()
     expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()

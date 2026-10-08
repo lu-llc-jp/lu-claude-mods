@@ -41,7 +41,7 @@ export type WorkLogAgent = {
   endedAt?: number
 }
 
-/** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー、map: メインのカードから枝を吊るしたマップのアニメーション */
+/** ペインの見せ方。list: 時刻順の一覧、tree: エージェントごとのツリー、map: メインのカードの下にサブエージェントの箱を並べた組織図のアニメーション */
 export type WorkLogView = 'list' | 'tree' | 'map'
 
 /** 要約を止めたときの記録。同じモデルのあいだは要約しない */
