@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { blankPixels, setPixel, toRaster } from './raster'
+import { blankPixels, setPixel, toQuadRaster } from './raster'
 
 const DEFAULT = 0x01000000
 
@@ -22,19 +22,14 @@ const words = (cells: string): number[] => {
   return out
 }
 
-test('縦2ドットを1マスにし、色のある側をブロックにする(透明な側は端末の既定色)', () => {
+test('4分割ブロックでは、2×2 ドットを1マスにする', () => {
   const pixels = blankPixels(4, 2)
-  setPixel(pixels, 0, 0, 0xff0000)
-  setPixel(pixels, 1, 1, 0x00ff00)
-  setPixel(pixels, 2, 0, 0x0000ff)
-  setPixel(pixels, 2, 1, 0xffffff)
-  const raster = toRaster(pixels)
+  setPixel(pixels, 0, 0, 0xd97757)
+  setPixel(pixels, 1, 0, 0xd97757)
+  setPixel(pixels, 0, 1, 0xd97757)
+  setPixel(pixels, 3, 1, 0xd97757)
+  const raster = toQuadRaster(pixels)
 
-  expect([raster.columns, raster.rows]).toEqual([4, 1])
-  expect(words(raster.cells)).toEqual([
-    0x2580, 0xff0000, DEFAULT,
-    0x2584, 0x00ff00, DEFAULT,
-    0x2580, 0x0000ff, 0xffffff,
-    0x20, DEFAULT, DEFAULT,
-  ])
+  expect([raster.columns, raster.rows]).toEqual([2, 1])
+  expect(words(raster.cells)).toEqual([0x259b, 0xd97757, DEFAULT, 0x2597, 0xd97757, DEFAULT])
 })

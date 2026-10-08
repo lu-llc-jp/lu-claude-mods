@@ -2,14 +2,11 @@
 export const CLEAR = -1
 /** RasterProps の「端末の既定色」 */
 const DEFAULT_COLOR = 0x01000000
-/** 上半分・下半分のブロック。ブロックの部分が前景色、残りが背景色になる */
-const UPPER_HALF = 0x2580
-const LOWER_HALF = 0x2584
 
 /** ドットの絵。data は左上から行ごとに並べた色(0x00RRGGBB、透明は CLEAR) */
 export type Pixels = { width: number; height: number; data: number[] }
 
-/** Raster に渡すもの。1マスに縦2ドットを詰めるので、rows は height の半分(切り上げ) */
+/** Raster に渡すもの */
 export type RasterCells = { columns: number; rows: number; cells: string }
 
 export const blankPixels = (width: number, height: number): Pixels => ({
@@ -26,26 +23,10 @@ export const setPixel = (pixels: Pixels, x: number, y: number, color: number): v
   pixels.data[y * pixels.width + x] = color
 }
 
-/** `0x00RRGGBB` を作る */
-export const rgb = (r: number, g: number, b: number): number =>
-  ((clamp(r) << 16) | (clamp(g) << 8) | clamp(b)) >>> 0
-const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)))
-
-/** a から b へ t(0〜1)だけ寄せた色 */
-export const mix = (a: number, b: number, t: number): number => {
-  const k = Math.max(0, Math.min(1, t))
-  const ch = (c: number, shift: number) => (c >> shift) & 0xff
-  return rgb(
-    ch(a, 16) + (ch(b, 16) - ch(a, 16)) * k,
-    ch(a, 8) + (ch(b, 8) - ch(a, 8)) * k,
-    ch(a, 0) + (ch(b, 0) - ch(a, 0)) * k,
-  )
-}
-
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
 /** パディング付きの標準 base64。エンジンの中には btoa も toBase64 も無いことがあるので自前で書く */
-export const base64Of = (bytes: Uint8Array): string => {
+const base64Of = (bytes: Uint8Array): string => {
   let out = ''
   for (let i = 0; i < bytes.length; i += 3) {
     const a = bytes[i] ?? 0
@@ -59,27 +40,33 @@ export const base64Of = (bytes: Uint8Array): string => {
   return out
 }
 
-/** ドットの絵を Raster の cells にする。縦2ドットを ▀ か ▄ の1マスにし、上下とも透明なら空白にする */
-export const toRaster = (pixels: Pixels): RasterCells => {
-  const columns = pixels.width
+
+/** 4分割ブロック。左上 1・右上 2・左下 4・右下 8 の和で引く */
+const QUADRANTS = [0x20, 0x2598, 0x259d, 0x2580, 0x2596, 0x258c, 0x259e, 0x259b, 0x2597, 0x259a, 0x2590, 0x259c, 0x2584, 0x2599, 0x259f, 0x2588]
+
+/**
+ * ドットの絵を、2×2 ドットを1マスにして Raster の cells にする。1マスに使える色は1つなので、
+ * 1色の絵(ロゴのような形)向け。マスの中に色が混ざるときは、左上から見て最初の色にする
+ */
+export const toQuadRaster = (pixels: Pixels): RasterCells => {
+  const columns = Math.ceil(pixels.width / 2)
   const rows = Math.ceil(pixels.height / 2)
   const bytes = new Uint8Array(columns * rows * 12)
   const view = new DataView(bytes.buffer)
   for (let row = 0; row < rows; row += 1) {
-    for (let x = 0; x < columns; x += 1) {
-      const top = getPixel(pixels, x, row * 2)
-      const bottom = getPixel(pixels, x, row * 2 + 1)
-      const at = (row * columns + x) * 12
-      // 前景色の既定は端末の文字色なので、透明な側をブロックにしてはいけない。色のある側をブロックにする
-      const [glyph, fg, bg] =
-        top === CLEAR && bottom === CLEAR
-          ? [0x20, DEFAULT_COLOR, DEFAULT_COLOR]
-          : top === CLEAR
-            ? [LOWER_HALF, bottom, DEFAULT_COLOR]
-            : [UPPER_HALF, top, bottom === CLEAR ? DEFAULT_COLOR : bottom]
-      view.setUint32(at, glyph, true)
-      view.setUint32(at + 4, fg, true)
-      view.setUint32(at + 8, bg, true)
+    for (let col = 0; col < columns; col += 1) {
+      const corners = [
+        getPixel(pixels, col * 2, row * 2),
+        getPixel(pixels, col * 2 + 1, row * 2),
+        getPixel(pixels, col * 2, row * 2 + 1),
+        getPixel(pixels, col * 2 + 1, row * 2 + 1),
+      ]
+      const bits = corners.reduce((sum, color, i) => (color === CLEAR ? sum : sum | (1 << i)), 0)
+      const color = corners.find(one => one !== CLEAR) ?? DEFAULT_COLOR
+      const at = (row * columns + col) * 12
+      view.setUint32(at, QUADRANTS[bits] ?? 0x20, true)
+      view.setUint32(at + 4, bits === 0 ? DEFAULT_COLOR : color, true)
+      view.setUint32(at + 8, DEFAULT_COLOR, true)
     }
   }
   return { columns, rows, cells: base64Of(bytes) }

@@ -434,14 +434,16 @@ test('ペインのボタンで一覧・ツリー・マップを順に回す', as
 
     await ui.press({ key: 'toggle-view' })
     expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
-    // どの面も、エージェントごとのカード。ドット絵のキャラはターミナルだけ
-    expect(await ui.find({ text: /^メイン · opus-5-5$/ })).toBeDefined()
-    expect(await ui.find({ text: /^#1 Explore · haiku$/ })).toBeDefined()
-    expect(await ui.find({ text: /^✓ 回答した$/ })).toBeDefined()
-    expect(await ui.find({ text: /^12秒$/ })).toBeDefined()
-    expect(await ui.find({ text: /^#2 Explore · haiku$/ })).toBeDefined()
-    const sprites = await ui.findAll({ type: 'Raster' })
-    expect(sprites).toHaveLength(surface === 'terminal' ? 3 : 0)
+    // ターミナルでは、メインのカードの左に Claude のキャラ(Raster)を置き、カードの ◉ は外す
+    if (surface === 'terminal') {
+      expect((await ui.find({ type: 'Raster' }))?.props).toEqual(expect.objectContaining({ columns: 9, rows: 4 }))
+      expect(await ui.find({ text: /^╭─ メイン ─+ opus-5-5 ─╮$/ })).toBeDefined()
+    } else {
+      expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+      expect(await ui.find({ text: /╭─ ◉ メイン ─+ opus-5-5 ─╮/ })).toBeDefined()
+    }
+    expect(await ui.find({ text: /├[─◆]+✓ #1 Explore·haiku {2}テストを調べる +12秒/ })).toBeDefined()
+    expect(await ui.find({ text: /╰[─●]+[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #2 Explore·haiku / })).toBeDefined()
 
     await ui.press({ key: 'toggle-view' })
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
@@ -476,7 +478,7 @@ const watchMap = (on: On) => {
   return redraws
 }
 
-test('マップでは、エージェントごとのカードを並べ、ターミナルはドット絵のキャラを添える', { options: { view: 'map' } }, async ($, on) => {
+test('マップでは、サブエージェント2つに2本の枝が伸び、依頼の粒が流れる', { options: { view: 'map' } }, async ($, on) => {
   const clock = answerBasics(on)
   answerTools(on)
   watchMap(on)
@@ -490,16 +492,14 @@ test('マップでは、エージェントごとのカードを並べ、ター�
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await mountPane($, surface)
-    expect(await ui.find({ text: /^メイン/ })).toBeDefined()
-    expect(await ui.find({ text: /^#1 Explore · haiku$/ })).toBeDefined()
-    expect(await ui.find({ text: /^#2 Explore · haiku$/ })).toBeDefined()
-    // 起動して 0.4 秒なので、説明はまだ打ち出している途中で、依頼の粒が線の上にいる
-    expect(await ui.find({ text: /^テスト.*▍$/ })).toBeDefined()
+    expect(await ui.find({ text: surface === 'terminal' ? /^╭─ メイン/ : /^╭─ ◉ メイン/ })).toBeDefined()
+    // サブエージェントはドット絵にせず、文字の枝で描く。Raster はメインのキャラの1つだけ
+    expect(await ui.findAll({ type: 'Raster' })).toHaveLength(surface === 'terminal' ? 1 : 0)
+    expect(await ui.find({ text: /├.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #1 Explore·haiku/ })).toBeDefined()
+    expect(await ui.find({ text: /╰.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] #2 Explore·haiku/ })).toBeDefined()
+    // 起動したての依頼の粒が、まだ道筋の上にいる
     expect(await ui.find({ text: /●/ })).toBeDefined()
     expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
-    // ターミナルはメインと2体のキャラ(3行)を描く
-    const sprites = await ui.findAll({ type: 'Raster' })
-    expect(sprites.map(one => one.props.rows)).toEqual(surface === 'terminal' ? [3, 3, 3] : [])
     await ui.unmount()
   }
 })

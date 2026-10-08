@@ -16,8 +16,8 @@ import {
   shortModel,
   summaryPrompt,
 } from './describe'
-import { layoutCards, type CardTone } from './cards'
-import { TICK_MS, isMapAnimating, type MapSeg, type MapTone } from './map'
+import { CLAWD_COLUMNS, clawdFrame } from './clawd'
+import { TICK_MS, isMapAnimating, layoutMap, mainMood, type MapLine, type MapTone } from './map'
 import { layoutTree, type TreeLine } from './tree'
 
 const PANE = 'cc-work-log'
@@ -323,48 +323,36 @@ export const register: Register = (on, options) => {
 
     if (view === 'map') {
       const now = await $.clock.now()
-      const { main, cards, omitted } = layoutCards(list, known, mainModel, now, room)
-      // キャラのドット絵(Raster)はターミナルにしかない。ほかの面ではキャラを省き、文字だけのカードにする
-      const sprites = new Map<string, JSX.Element>()
+      // ターミナルでは、メインのカードの左に Claude のキャラ(Raster)を置く。Raster の無い面では文字だけのマップにする
       if (e.surface === 'terminal') {
         const { Raster } = $.ui.resolve(e)
-        for (const card of [main, ...cards]) {
-          sprites.set(card.key, <Raster key={`sprite:${card.key}`} {...card.sprite.raster} />)
-        }
+        const lines = layoutMap(list, known, mainModel, now, room, width, CLAWD_COLUMNS + 1)
+        const hub = lines.filter(line => line.key.startsWith('hub:'))
+        return (
+          <Box flexDirection="column" width={width}>
+            {header}
+            <Box flexDirection="row" gap={1}>
+              <Raster key="clawd" {...clawdFrame(mainMood(list, known, now), now)} />
+              <Box flexDirection="column">
+                {hub.map(line => (
+                  <MapRow key={line.key} Text={Text} line={line} />
+                ))}
+              </Box>
+            </Box>
+            {lines
+              .filter(line => !line.key.startsWith('hub:'))
+              .map(line => (
+                <MapRow key={line.key} Text={Text} line={line} />
+              ))}
+          </Box>
+        )
       }
       return (
         <Box flexDirection="column" width={width}>
           {header}
-          {[main, ...cards].map(card => (
-            <Box key={`card:${card.key}`} flexDirection="row" width={width}>
-              {card.gutter.length === 0 ? null : (
-                <Box flexDirection="column">
-                  {card.gutter.map((segs, i) => (
-                    <Segs key={String(i)} Text={Text} segs={segs} />
-                  ))}
-                </Box>
-              )}
-              <Box
-                flexDirection="row"
-                flexGrow={1}
-                gap={1}
-                borderStyle="round"
-                paddingX={1}
-                {...CARD_BORDER[card.tone]}
-              >
-                {sprites.get(card.key) ?? null}
-                <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-                  <Box flexDirection="row" justifyContent="space-between" gap={1}>
-                    <Segs Text={Text} segs={card.title} />
-                    {card.time === undefined ? null : <Segs Text={Text} segs={[card.time]} />}
-                  </Box>
-                  <Segs Text={Text} segs={card.name} />
-                  <Segs Text={Text} segs={card.activity} />
-                </Box>
-              </Box>
-            </Box>
+          {layoutMap(list, known, mainModel, now, room, width).map(line => (
+            <MapRow key={line.key} Text={Text} line={line} />
           ))}
-          {omitted > 0 ? <Text dimColor>ほか {omitted} 体を省いた</Text> : null}
         </Box>
       )
     }
@@ -482,12 +470,17 @@ const TreeRow = ({ Text, line }: { Text: TextElement; line: TreeLine }) => {
 
 type MapStyle = { color?: string; dimColor?: boolean; bold?: boolean; italic?: boolean }
 
-/** マップの文字の色分け。線は薄く、動いているもの(粒・光・スピナー)だけに色を載せる。色はテーマのキーにして、明るいテーマでも読めるようにする */
+/** マップの色分け。線は薄く、動いているもの(粒・光・スピナー・メインの枠)だけに色を載せる。色はテーマのキーにして、明るいテーマでも読めるようにする */
 const MAP_STYLE: Record<MapTone, MapStyle> = {
   edge: { color: 'subtle' },
-  live: { color: 'claude', bold: true },
+  live: { color: 'claude' },
   flow: { color: 'claude', bold: true },
+  flowTrail: { color: 'claude' },
   back: { color: 'success', bold: true },
+  backTrail: { color: 'success' },
+  hub: { color: 'claude' },
+  hubIdle: { color: 'subtle' },
+  hubFlash: { color: 'success', bold: true },
   title: { bold: true },
   spin: { color: 'claude', bold: true },
   ok: { color: 'success' },
@@ -503,23 +496,15 @@ const MAP_STYLE: Record<MapTone, MapStyle> = {
   more: { dimColor: true },
 }
 
-/** カードの枠の色。実行中は目立たせ、終えたものは沈める。結果が届いた瞬間だけ緑に光る */
-const CARD_BORDER: Record<CardTone, { borderColor?: string; borderDimColor?: boolean }> = {
-  live: { borderColor: 'claude' },
-  flash: { borderColor: 'success' },
-  done: { borderColor: 'subtle' },
-  error: { borderColor: 'error' },
-  idle: { borderColor: 'subtle' },
-}
-
 /** エージェントの種類の色。種類ごとに hueOf で決まった番号の色を使う */
 const TYPE_COLORS: readonly string[] = ['permission', 'suggestion', 'remember', 'merged', 'autoAccept', 'planMode']
 
-/** 色分けした区切りを1行の Text にする。空でも1行の高さを取るよう、空白を置く */
-const Segs = ({ Text, segs }: { Text: TextElement; segs: readonly MapSeg[] }) => (
+/** マップの1行 */
+const MapRow = ({ Text, line }: { Text: TextElement; line: MapLine }) => (
   <Text wrap="truncate">
-    {segs.length === 0 ? ' ' : null}
-    {segs.map((seg, i) => (
+    {/* 空の行も1行の高さを取るよう、空白を置く */}
+    {line.segs.length === 0 ? ' ' : null}
+    {line.segs.map((seg, i) => (
       <Text
         key={String(i)}
         {...MAP_STYLE[seg.tone]}
