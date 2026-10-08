@@ -55,6 +55,10 @@ const spawnExplore = ($: Engine, toolUseId = 'workflow-1') =>
 
 const texts = async ($: Engine) => (await entries($)).map(one => one.text)
 
+/** 強調されている(今見ている)タブの名前 */
+const currentTab = async (ui: { findAll: (q: { type: 'Button' }) => Promise<Array<{ text?: string; props: Record<string, unknown> }>> }) =>
+  (await ui.findAll({ type: 'Button' })).find(one => one.props.variant === 'primary')?.text
+
 test('主なツールを日本語の1行にする', () => {
   expect(describeTool('Read', { file_path: `${CWD}/src/a.ts` }, CWD)).toBe('`src/a.ts` を読む')
   expect(describeTool('Edit', { file_path: `${CWD}/src/a.ts` }, CWD)).toBe('`src/a.ts` を編集')
@@ -406,7 +410,7 @@ test('同時に起動したサブエージェントにも、別々の通し番�
   expect(Object.values(agents).map(one => one.no).sort()).toEqual([1, 2, 3])
 })
 
-test('ペインのボタンで一覧・ツリー・マップを順に回す', async ($, on) => {
+test('ペインのタブで一覧・ツリー・マップを切り替え、今見ているタブを強調する', async ($, on) => {
   answerBasics(on)
   answerTools(on)
   let n = 0
@@ -422,19 +426,19 @@ test('ペインのボタンで一覧・ツリー・マップを順に回す', as
   for (const surface of ['terminal', 'desktop'] as const) {
     delete state.view
     const ui = await mountPane($, surface)
-    // 初期値は一覧
+    // 初期値は一覧。3つのタブが並び、今見ているタブだけ強調する
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
-    expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
+    expect(await currentTab(ui)).toBe('一覧')
+    expect((await ui.findAll({ type: 'Button' })).map(one => one.text).slice(0, 3)).toEqual(['一覧', 'ツリー', 'マップ'])
 
-    await ui.press({ key: 'toggle-view' })
-    expect(await ui.find({ text: /マップで見る/ })).toBeDefined()
+    await ui.press({ key: 'view:tree' })
+    expect(await currentTab(ui)).toBe('ツリー')
     expect(await ui.find({ text: /メイン·opus-5-5 …/ })).toBeDefined()
     expect(await ui.find({ text: /├─ #1 Explore·haiku『テストを調べる』 ✓ 12秒/ })).toBeDefined()
     expect(await ui.find({ text: /└─ #2 Explore·haiku『テストを調べる』 …/ })).toBeDefined()
 
-    await ui.press({ key: 'toggle-view' })
-    expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
-    // ターミナルでは、メインのカードの左に Claude のキャラ(Raster)を置き、カードの ◉ は外す
+    await ui.press({ key: 'view:map' })
+    expect(await currentTab(ui)).toBe('マップ')
     if (surface === 'terminal') {
       // ターミナルでは、メインのカードの中に Claude のキャラ(Raster)を置き、カードの ◉ は外す
       expect((await ui.find({ type: 'Raster' }))?.props).toEqual(expect.objectContaining({ columns: 9, rows: 4 }))
@@ -448,9 +452,10 @@ test('ペインのボタンで一覧・ツリー・マップを順に回す', as
     expect(await ui.find({ type: 'Button', text: '#2 Explore' })).toBeDefined()
     expect(await ui.find({ text: /│ ✓ 12秒 +│ │ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 0秒 +│/ })).toBeDefined()
 
-    await ui.press({ key: 'toggle-view' })
+    // マップから一覧へ直接戻れる
+    await ui.press({ key: 'view:list' })
+    expect(await currentTab(ui)).toBe('一覧')
     expect(await ui.find({ text: /メイン: opus-5-5/ })).toBeDefined()
-    expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -464,7 +469,7 @@ test('/config の view を tree にすると、ツリーで開く', { options: {
 
   const ui = await mountPane($, 'terminal')
   expect(await ui.find({ text: /└─ ✓ `a.ts` を読む/ })).toBeDefined()
-  expect(await ui.find({ text: /マップで見る/ })).toBeDefined()
+  expect(await currentTab(ui)).toBe('ツリー')
   await ui.unmount()
 })
 
@@ -502,7 +507,7 @@ test('マップでは、組織図のようにサブエージェント2つの箱�
     expect(await ui.find({ type: 'Button', text: '#2 Explore' })).toBeDefined()
     // 起動したての依頼の粒が、まだ道筋の上にいる
     expect(await ui.find({ text: /●/ })).toBeDefined()
-    expect(await ui.find({ text: /一覧で見る/ })).toBeDefined()
+    expect(await currentTab(ui)).toBe('マップ')
     await ui.unmount()
   }
 })
@@ -529,8 +534,8 @@ test('マップは動いているあいだだけ描き直し、何も動いて�
 
   // 一覧に切り替えていれば、動きがあっても描き直さない
   const ui = await mountPane($, 'terminal')
-  await ui.press({ key: 'toggle-view' })
-  expect(await ui.find({ text: /ツリーで見る/ })).toBeDefined()
+  await ui.press({ key: 'view:list' })
+  expect(await currentTab(ui)).toBe('一覧')
   const listed = redraws.count
   await $.tool.call({ tool: 'Read', file_path: `${CWD}/a.ts` })
   await clock.advance(1000)

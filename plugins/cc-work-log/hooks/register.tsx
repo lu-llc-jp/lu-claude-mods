@@ -46,9 +46,12 @@ const setStatus = async ($: EngineInterface, id: string, status: WorkLogEntry['s
   await update($, entries, list => list.map(one => (one.id === id ? { ...one, status } : one)))
 }
 
-/** ボタンで回す見せ方の順と、そのボタンの文言(押すと次の見せ方になる) */
-const NEXT_VIEW: Record<WorkLogView, WorkLogView> = { list: 'tree', tree: 'map', map: 'list' }
-const VIEW_BUTTON: Record<WorkLogView, string> = { list: 'ツリーで見る', tree: 'マップで見る', map: '一覧で見る' }
+/** 見せ方のタブ。並び順、名前、押すキー */
+const VIEW_TABS: ReadonlyArray<{ view: WorkLogView; label: string; hotkey: string }> = [
+  { view: 'list', label: '一覧', hotkey: '1' },
+  { view: 'tree', label: 'ツリー', hotkey: '2' },
+  { view: 'map', label: 'マップ', hotkey: '3' },
+]
 
 const isView = (value: unknown): value is WorkLogView => value === 'list' || value === 'tree' || value === 'map'
 
@@ -317,24 +320,31 @@ export const register: Register = (on, options) => {
     // 見出しの1行を除いた行数。最新の行が見えるよう、入るぶんだけ後ろから出す
     const room = Math.max(1, e.props.scroll.bodyRows - 1)
 
+    // 見せ方は3つのタブで切り替える。今見ているタブは強調し、ほかは薄く出す
     const header = (
       <Box flexDirection="row" gap={1}>
-        <Button
-          key="toggle-view"
-          hotkey="v"
-          dimColor
-          onPress={async () => {
-            await update($, viewAtom, () => NEXT_VIEW[view])
-            animate($, configView)
-          }}
-        >
-          {VIEW_BUTTON[view]}
-        </Button>
-        {view === 'list' && mainModel !== '' ? (
-          <Text dimColor wrap="truncate">
-            メイン: {shortModel(mainModel)}
-          </Text>
-        ) : null}
+        {VIEW_TABS.map(tab =>
+          tab.view === view ? (
+            <Button key={`view:${tab.view}`} hotkey={tab.hotkey} variant="primary" onPress={() => undefined}>
+              {tab.label}
+            </Button>
+          ) : (
+            <Button
+              key={`view:${tab.view}`}
+              hotkey={tab.hotkey}
+              dimColor
+              onPress={async () => {
+                await update($, viewAtom, () => tab.view)
+                animate($, configView)
+              }}
+            >
+              {tab.label}
+            </Button>
+          ),
+        )}
+        <Text dimColor wrap="truncate">
+          1・2・3 で切り替え{view === 'list' && mainModel !== '' ? `  メイン: ${shortModel(mainModel)}` : ''}
+        </Text>
       </Box>
     )
 
